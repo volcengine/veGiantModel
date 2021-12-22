@@ -1,7 +1,7 @@
 #! /bin/bash
 # Runs the "345M" parameter model
 
-DATA_PATH=<Specify path>
+DATA_PATH=<Specify path where >
 CHECKPOINT_PATH=<Specify path>
 
 export WORKER_0_HOST=localhost
@@ -10,12 +10,14 @@ export NUM_WORKER=1
 export WORKER_RANK=0
 export GPU_PER_WORKER=8
 
+MASTER_PORT=6002
+MASTER_ADDR=$WORKER_0_HOST
+
 GPUS_PER_NODE=$GPU_PER_WORKER
 
-MASTER_ADDR=$WORKER_0_HOST
-MASTER_PORT=6002
 NNODES=$NUM_WORKER
 NODE_RANK=$WORKER_RANK
+
 WORLD_SIZE=$(($GPUS_PER_NODE*$NNODES))
 
 base_dir=$(cd `dirname $0`; pwd)
