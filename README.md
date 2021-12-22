@@ -1,5 +1,5 @@
 # veGiantModel
-
+VeGiantModel is a torch based high efficient training library developed by the Applied Machine Learning team at Bytedance. This repository is for ongoing research to make giant model (such as [GPT](https://arxiv.org/abs/2005.14165), [BERT](https://arxiv.org/pdf/1810.04805.pdf) and [T5](https://arxiv.org/abs/1910.10683)) training easy, efficient, and effective. VeGiantModel builds on top of [Megatron](https://github.com/NVIDIA/Megatron-LM) and [DeepSpeed](https://github.com/microsoft/DeepSpeed), improves communication efficiency by integrating high efficient communication library [BytePs](https://github.com/bytedance/byteps) and providing customized pipline partitioning.
 ## initialization
 
 ```python
@@ -44,3 +44,8 @@ class PositionWiseFeedForward(nn.Module):
             fc2_out = self.dropout(fc2_out)
         return fc2_out
 ```
+
+
+## Examples
+### GPT Pretraining
+The `examples/gpt/pretrain_gpt2_distributed.sh` scrips runs 345M parameter GPT pretraining on single 8 GPUs node. It follows largely the same as Megatron GPT script with a few notable differences. It shows good compatiblility with current megatron/Deepseed training job with little changes to adpot VeGiantModel.
