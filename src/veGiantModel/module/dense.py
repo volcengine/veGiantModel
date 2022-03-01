@@ -27,7 +27,6 @@ class MockModule(nn.Module):
     pass
 
 try:
-    import ptx.ops.fastertransformer.training
     from th_fastertransformer import Linear
 
     class LinearFunction(autograd.Function):
@@ -82,7 +81,6 @@ except Exception as e:
     FTLinear = None
 
 try:
-    import ptx.ops.fastertransformer.training
     from th_fastertransformer import LinearTranspose
 
     class LinearTransposeFunction(autograd.Function):
