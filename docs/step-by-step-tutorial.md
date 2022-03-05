@@ -17,7 +17,9 @@ sudo pip3 install dist/*
 
 BytePs:
 ```
-pip3 install byteps
+git clone --recursive -b bccl-github https://github.com/bytedance/byteps.git
+cd byteps
+python3 setup.py install
 ```
 ## Prepare data
     [GPT data preprocess](https://github.com/NVIDIA/Megatron-LM#data-preprocessing)

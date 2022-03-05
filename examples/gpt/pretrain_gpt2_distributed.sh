@@ -4,11 +4,16 @@
 DATA_PATH=<Specify path where >
 CHECKPOINT_PATH=<Specify path>
 
-export WORKER_0_HOST=localhost
+export WORKER_0_HOST=127.0.0.1
+export DMLC_NODE_HOST=127.0.0.1
 export WORKER_0_PORT=6000
 export NUM_WORKER=1
 export WORKER_RANK=0
 export GPU_PER_WORKER=8
+
+export BYTEPS_WITH_UCX=0 
+export DMLC_ENABLE_UCX=0
+export DMLC_ENABLE_RDMA=0
 
 MASTER_PORT=6002
 MASTER_ADDR=$WORKER_0_HOST
