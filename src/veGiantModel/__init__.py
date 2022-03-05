@@ -1,18 +1,23 @@
 # Copyright (c) 2021, ByteDance Inc.  All rights reserved.
-import sys
-import os
+# import sys
+# import os
 
-cwd = os.path.dirname(os.path.abspath(__file__))
-_deepspeed_dir = os.path.join(cwd, '../../third_party/deepspeed')
-_megatron_dir = os.path.join(cwd, '../../third_party/megatron')
-sys.path.append(cwd)
-sys.path.append(_deepspeed_dir)
-sys.path.append(_megatron_dir)
+# cwd = os.path.dirname(os.path.abspath(__file__))
+# _deepspeed_dir = os.path.join(cwd, '../../third_party/deepspeed')
+# _megatron_dir = os.path.join(cwd, '../../third_party/megatron')
+# sys.path.append(cwd)
+# sys.path.append(_deepspeed_dir)
+# sys.path.append(_megatron_dir)
 
-from . import patcher
-from .engine.engine import VeGiantModelEngine
-from .initialize import initialize_megatron, init_distribute
+import torch
+
+from . import mpu
 from .distributed import *
+from .engine.engine import veGiantModelEngine
+from .initialize import init_distributed, initialize_megatron
+from megatron.model import utils
+
+__all__ = ['init_distributed', 'initialize_megatron']
 
 def initialize(args,
                model,
@@ -24,7 +29,7 @@ def initialize(args,
                dist_init_required=None,
                collate_fn=None,
                config_params=None):
-    engine = VeGiantModelEngine(args=args,
+    engine = veGiantModelEngine(args=args,
                     model=model,
                     optimizer=optimizer,
                     model_parameters=model_parameters,

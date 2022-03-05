@@ -1,35 +1,27 @@
 # Copyright (c) 2021, ByteDance Inc.  All rights reserved.
 # Copyright 2019 The Microsoft DeepSpeed Team
+import logging
 import os
-
 from types import MethodType
 
 import torch
-
 import torch.distributed as dist
-
+from deepspeed.runtime.dataloader import RepeatingLoader
+from deepspeed.runtime.engine import MEMORY_OPT_ALLREDUCE_SIZE
+from deepspeed.runtime.pipe.engine import PipelineEngine
+from deepspeed.runtime.pipe.module import PipelineError, PipelineModule
+from deepspeed.utils import log_dist
 from deepspeed.utils.logging import logger
 from deepspeed.utils.timer import ThroughputTimer
 
-from deepspeed.runtime.engine import MEMORY_OPT_ALLREDUCE_SIZE
-from deepspeed.runtime.dataloader import RepeatingLoader
+from . import p2p, schedule
 
-from deepspeed.runtime.pipe.module import PipelineModule, PipelineError
-from deepspeed.runtime.pipe.engine import PipelineEngine
-from . import p2p
-from . import schedule
 try:
     import byteps.torch as bps
 except ImportError:
     print("byteps is not installed. Pipeline parallelism is disabled")
     bps = None
 
-from .module import VeGiantModule
-from deepspeed.utils import log_dist
-import logging
-from torch._six import inf
-
-# from inspect import signature
 
 LOG_STAGE = -2
 DATA_PARALLEL_ID = -2
@@ -89,7 +81,7 @@ def _code_to_dtype(code):
     else:
         raise AssertionError("not recognized tensor type code for pipeline recv")
 
-class VeGiantModelEngine(PipelineEngine):
+class veGiantModelEngine(PipelineEngine):
     """ A training engine hybrid pipeline, data, and model parallel training.
 
     This engine is created by ``deepspeed.initialize()`` when a :class:`PipelineModule`

@@ -2,13 +2,16 @@
 #!/usr/bin/python
 
 from __future__ import print_function
+
+import logging
 import os
 import subprocess
-import threading
 import sys
-from megatron import mpu
+import threading
+
 from deepspeed.utils import log_dist
-import logging
+from veGiantModel.megatron import mpu
+
 
 class PropagatingThread(threading.Thread):
     """ propagate exceptions to the parent's thread

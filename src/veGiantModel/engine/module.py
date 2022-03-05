@@ -1,23 +1,21 @@
 # Copyright (c) 2021, ByteDance Inc.  All rights reserved.
 import os
-
 import re as regex
-
 from functools import partial
-
-import torch
-import torch.nn as nn
-import torch.distributed as dist
-
 from math import floor
 
-from deepspeed.utils import logger
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+from deepspeed.pipe import LayerSpec, PipelineModule, TiedLayerSpec
 from deepspeed.runtime import utils as ds_utils
 from deepspeed.runtime.activation_checkpointing import checkpointing
-from deepspeed.pipe import PipelineModule,LayerSpec, TiedLayerSpec
+from deepspeed.utils import logger
+
 from .topology import PipeDataParallelTopology, PipelineParallelGrid
 
-class VeGiantModule(PipelineModule):
+
+class veGiantModule(PipelineModule):
     def __init__(self,
                  layers,
                  num_stages=None,

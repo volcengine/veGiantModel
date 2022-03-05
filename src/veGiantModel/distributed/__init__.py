@@ -1,5 +1,8 @@
-from .. import patcher as dist
-from megatron import mpu
+# Copyright (c) 2021, ByteDance Inc.  All rights reserved.
+
+from veGiantModel import patcher as dist
+from veGiantModel.megatron import mpu
+
 
 def get_model_parallel_world_size():
     return dist.get_model_parallel_world_size()

@@ -1,15 +1,13 @@
 # Copyright (c) 2021, ByteDance Inc.  All rights reserved.
 # Copyright 2019 The Microsoft DeepSpeed Team
 
-from deepspeed.utils import log_dist
-
-import torch.distributed as dist
-
+import logging
 from collections import namedtuple
 from itertools import product as cartesian_product
-import logging, os
 
-import torch
+import torch.distributed as dist
+from deepspeed.utils import log_dist
+
 
 class ProcessTopology:
     """ Manages the mapping of n-dimensional Cartesian coordinates to linear
@@ -60,7 +58,7 @@ class ProcessTopology:
             raise ValueError('get_rank() does not support slices. Use filter_match())')
 
         key = self.ProcessCoord(**coord_kwargs)
-        assert key in self.mapping, f'key {kwargs} invalid'
+        assert key in self.mapping, f'key {key} invalid'
         return self.mapping[key]
 
     def get_axis_names(self):

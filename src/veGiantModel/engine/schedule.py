@@ -1,11 +1,11 @@
 # Copyright (c) 2021, ByteDance Inc.  All rights reserved.
-from deepspeed.runtime.pipe.schedule import (
-    BufferOpInstruction,PipeInstruction,
-    ReduceTiedGrads,ReduceGrads,OptimizerStep,
-    LoadMicroBatch,PipeSchedule,TrainSchedule,
-)
-
 import os
+
+from deepspeed.runtime.pipe.schedule import (BufferOpInstruction,
+                                             LoadMicroBatch, OptimizerStep,
+                                             PipeInstruction, PipeSchedule,
+                                             ReduceGrads, ReduceTiedGrads,
+                                             TrainSchedule)
 
 BYTEPS_REDUCED_MEM = os.environ.get('BYTEPS_REDUCED_MEM', '1') != '0'
 

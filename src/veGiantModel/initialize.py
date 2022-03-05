@@ -1,22 +1,23 @@
 # Copyright (c) 2021, ByteDance Inc.  All rights reserved.
-import torch
+import logging
 import os
 import random
+
 import numpy as np
-
-from megatron.global_vars import set_global_variables
-from megatron import get_args, mpu, print_rank_0
-from .engine.topology import PipeModelDataParallelTopology, PipelineParallelGrid
-from .launcher.launch import launch_bps
+import torch
 from deepspeed.utils import log_dist
-import logging
+
+from .engine.topology import (PipelineParallelGrid,
+                              PipeModelDataParallelTopology)
+from .launcher.launch import launch_bps
+from .megatron import mpu, print_rank_0
+from .megatron.global_vars import get_args, set_global_variables
 
 
-
-def add_byte_giant_model_customize_args(parser):
+def add_ve_giant_model_customize_args(parser):
     import deepspeed
     parser = deepspeed.add_config_arguments(parser)
-    group = parser.add_argument_group(title='bytedance')
+    group = parser.add_argument_group(title='volcengine')
     group.add_argument('--cpu-optimizer', action='store_true',
                        help='Run optimizer on CPU')
     group.add_argument('--cpu_torch_adam', action='store_true',
@@ -50,9 +51,9 @@ def add_byte_giant_model_customize_args(parser):
     return parser
 
 def initialize_megatron(extra_args_provider=None, args_defaults={}):
-    set_global_variables(extra_args_provider=add_byte_giant_model_customize_args, args_defaults=args_defaults)
+    set_global_variables(extra_args_provider=add_ve_giant_model_customize_args, args_defaults=args_defaults)
     args = get_args()
-    init_distribute(args.num_stages, args.model_parallel_size)
+    init_distributed(args.num_stages, args.model_parallel_size)
     _set_random_seed(args.seed)
 
 def _init_topology(num_stages, mp_size):
@@ -77,7 +78,7 @@ def _set_random_seed(seed):
     else:
         raise ValueError('Seed ({}) should be a positive integer.'.format(seed))
 
-def init_distribute(num_stages, mp_size,
+def init_distributed(num_stages, mp_size,
                     distributed_backend='nccl', init_method='tcp://'):
     rank = int(os.getenv('RANK', '0'))
     world_size = int(os.getenv("WORLD_SIZE", '1'))

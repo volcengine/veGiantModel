@@ -4,9 +4,8 @@ Copyright 2019 The Microsoft DeepSpeed Team
 '''
 
 import os
-import torch
+
 import torch.distributed as dist
-from deepspeed.utils import logger, log_dist
 
 ENABLE_PYTORCH_BROADCAST = os.environ.get("ENABLE_PYTORCH_BROADCAST", "0") != "0"
 
