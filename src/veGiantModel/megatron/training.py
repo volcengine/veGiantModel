@@ -25,32 +25,32 @@ _TRAIN_START_TIME = time.time()
 import torch
 from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
 
-from megatron import get_args
-from megatron import get_signal_handler
-from megatron import get_timers
-from megatron import get_tensorboard_writer
-from megatron import get_current_global_batch_size
-from megatron import get_num_microbatches
-from megatron import is_last_rank
-from megatron import update_num_microbatches
-from megatron import mpu
-from megatron import print_rank_0
-from megatron import print_rank_last
-from megatron.checkpointing import load_checkpoint
-from megatron.checkpointing import save_checkpoint
-from megatron.model import Float16Module
-from megatron.model import ModelType
-from megatron.optimizer import get_megatron_optimizer
-from megatron.initialize import initialize_megatron
-from megatron.initialize import write_args_to_tensorboard
-from megatron.learning_rates import AnnealingLR
-from megatron.model import DistributedDataParallel as LocalDDP
-from megatron.utils import check_adlr_autoresume_termination
-from megatron.utils import unwrap_model
-from megatron.data.data_samplers import build_pretraining_data_loader
-from megatron.utils import calc_params_l2_norm
-from megatron.schedules import get_forward_backward_func
-from megatron.utils import report_memory
+from . import get_args
+from . import get_signal_handler
+from . import get_timers
+from . import get_tensorboard_writer
+from . import get_current_global_batch_size
+from . import get_num_microbatches
+from . import is_last_rank
+from . import update_num_microbatches
+from . import mpu
+from . import print_rank_0
+from . import print_rank_last
+from .checkpointing import load_checkpoint
+from .checkpointing import save_checkpoint
+from .model import Float16Module
+from .model import ModelType
+from .optimizer import get_megatron_optimizer
+from .initialize import initialize_megatron
+from .initialize import write_args_to_tensorboard
+from .learning_rates import AnnealingLR
+from .model import DistributedDataParallel as LocalDDP
+from .utils import check_adlr_autoresume_termination
+from .utils import unwrap_model
+from .data.data_samplers import build_pretraining_data_loader
+from .utils import calc_params_l2_norm
+from .schedules import get_forward_backward_func
+from .utils import report_memory
 
 
 

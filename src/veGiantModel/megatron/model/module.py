@@ -19,8 +19,8 @@ import torch
 from torch.autograd import Variable
 from torch.nn.parameter import Parameter
 
-from megatron import get_args
-from megatron import mpu
+from veGiantModel.megatron import get_args
+from veGiantModel.megatron import mpu
 
 
 _FLOAT_TYPES = (torch.FloatTensor, torch.cuda.FloatTensor)

@@ -21,9 +21,9 @@ from torch._six import inf
 from apex.multi_tensor_apply import multi_tensor_applier
 import amp_C
 
-from megatron import mpu
-from megatron.model.module import param_is_not_shared
-from megatron.mpu.layers import param_is_not_tensor_parallel_duplicate
+from veGiantModel.megatron import mpu
+from veGiantModel.megatron.model.module import param_is_not_shared
+from veGiantModel.megatron.mpu.layers import param_is_not_tensor_parallel_duplicate
 
 
 def clip_grad_norm_fp32(parameters, max_norm, norm_type=2):

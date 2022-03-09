@@ -20,8 +20,8 @@ import random
 import torch
 import numpy as np
 from torch.utils.data import Dataset
-from megatron import get_args
-from megatron import mpu
+from veGiantModel.megatron import get_args
+from veGiantModel.megatron import mpu
 
 
 def build_pretraining_data_loader(dataset, consumed_samples):

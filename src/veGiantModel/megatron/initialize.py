@@ -23,13 +23,13 @@ import numpy as np
 import torch
 from datetime import timedelta
 
-from megatron import fused_kernels
-from megatron import get_adlr_autoresume
-from megatron import get_args
-from megatron import get_tensorboard_writer
-from megatron import mpu
-from megatron.global_vars import set_global_variables
-from megatron.mpu import (set_tensor_model_parallel_rank,
+from . import fused_kernels
+from . import get_adlr_autoresume
+from . import get_args
+from . import get_tensorboard_writer
+from . import mpu
+from .global_vars import set_global_variables
+from .mpu import (set_tensor_model_parallel_rank,
                           set_tensor_model_parallel_world_size)
 
 

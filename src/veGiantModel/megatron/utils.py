@@ -23,12 +23,12 @@ from torch.nn.parallel import DistributedDataParallel as torchDDP
 from apex.multi_tensor_apply import multi_tensor_applier
 import amp_C
 
-from megatron import get_args
-from megatron import print_rank_0
-from megatron import get_adlr_autoresume
-from megatron import mpu
-from megatron.model.module import param_is_not_shared
-from megatron.mpu.layers import param_is_not_tensor_parallel_duplicate
+from . import get_args
+from . import print_rank_0
+from . import get_adlr_autoresume
+from . import mpu
+from .model.module import param_is_not_shared
+from .mpu.layers import param_is_not_tensor_parallel_duplicate
 
 
 def unwrap_model(model, module_instances=(torchDDP)):

@@ -17,8 +17,8 @@ from functools import reduce
 import operator
 import torch
 
-from megatron import get_args
-from megatron import mpu
+from . import get_args
+from . import mpu
 
 
 def _communicate(tensor_send_next, tensor_send_prev, recv_prev, recv_next,

@@ -18,14 +18,14 @@ import math
 import torch
 import torch.nn.functional as F
 
-from megatron import get_args
-from megatron import mpu
+from veGiantModel.megatron import get_args
+from veGiantModel.megatron import mpu
 from .module import MegatronModule
-from megatron.model.enums import AttnMaskType, ModelType, LayerType, AttnType
-from megatron.model import LayerNorm
-from megatron.model.fused_softmax import FusedScaleMaskSoftmax
-from megatron.model.fused_bias_gelu import bias_gelu_impl
-from megatron.model.utils import attention_mask_func, openai_gelu, erf_gelu
+from .enums import AttnMaskType, ModelType, LayerType, AttnType
+from . import LayerNorm
+from .fused_softmax import FusedScaleMaskSoftmax
+from .fused_bias_gelu import bias_gelu_impl
+from .utils import attention_mask_func, openai_gelu, erf_gelu
 
 """ We use the following notation throughout this file:
      h: hidden size

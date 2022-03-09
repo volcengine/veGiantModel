@@ -82,7 +82,7 @@ def get_grid():
 def get_topo():
     return _TOPOLOGY.topology()
 
-import megatron.mpu.initialize as initialize
+from .megatron.mpu import initialize
 initialize.is_unitialized = is_unitialized
 initialize.initialize_model_parallel = initialize_model_parallel
 initialize.model_parallel_is_initialized = model_parallel_is_initialized
@@ -98,15 +98,14 @@ initialize.get_data_parallel_rank = get_data_parallel_rank
 initialize.get_pipe_parallel_rank = get_pipe_parallel_rank
 initialize.destroy_model_parallel = destroy_model_parallel
 
-from megatron import mpu
+from .megatron import mpu
 from importlib import reload  
 reload(mpu.data)
-reload(mpu.mappings)
 reload(mpu.cross_entropy)
 mpu.get_pipe_parallel_rank = get_pipe_parallel_rank
 reload(mpu)
 
-from megatron.mpu import mappings
+from .megatron.mpu import mappings
 
 def _gather(input_):
     """Gather tensors and concatinate along the last dimension."""
@@ -131,44 +130,10 @@ def _gather(input_):
     return output
 
 mappings._gather = _gather
+reload(mpu.mappings)
 
-from megatron.tokenizer import tokenizer as token
-from megatron.tokenizer.tokenizer import _BertWordPieceTokenizer, _vocab_size_with_padding, _GPT2BPETokenizer
+from . import megatron
 
-def build_tokenizer(args):
-    if args.vocab_file is None:
-        args.padded_vocab_size = _vocab_size_with_padding(args.vocab_size,
-                                                    args)
-        return None
-    """Initialize tokenizer."""
-    if args.rank == 0:
-        print('> building {} tokenizer ...'.format(args.tokenizer_type),
-              flush=True)
-
-    # Select and instantiate the tokenizer.
-    assert args.vocab_file is not None
-    if args.tokenizer_type == 'BertWordPieceLowerCase':
-        tokenizer = _BertWordPieceTokenizer(vocab_file=args.vocab_file,
-                                            lower_case=True)
-    elif args.tokenizer_type == 'BertWordPieceCase':
-        tokenizer = _BertWordPieceTokenizer(vocab_file=args.vocab_file,
-                                            lower_case=False)
-    elif args.tokenizer_type == 'GPT2BPETokenizer':
-        assert args.merge_file is not None
-        tokenizer = _GPT2BPETokenizer(args.vocab_file, args.merge_file)
-    else:
-        raise NotImplementedError('{} tokenizer is not '
-                                  'implemented.'.format(args.tokenizer_type))
-
-    # Add vocab size.
-    args.padded_vocab_size = _vocab_size_with_padding(tokenizer.vocab_size,
-                                                      args)
-
-    return tokenizer
-
-token.build_tokenizer = build_tokenizer
-import megatron
-reload(megatron.tokenizer)
 reload(megatron.global_vars)
 reload(megatron.global_vars)
 print("veGiantModel loaded.")

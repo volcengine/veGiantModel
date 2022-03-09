@@ -21,8 +21,8 @@ import time
 
 import torch
 
-from megatron import dist_signal_handler
-from megatron.tokenizer import build_tokenizer
+from . import dist_signal_handler
+from .tokenizer import build_tokenizer
 from .arguments import parse_args
 from .microbatches import build_num_microbatches_calculator
 

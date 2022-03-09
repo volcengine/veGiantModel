@@ -18,15 +18,15 @@ import torch
 from torch.autograd.variable import Variable
 from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
 
-from megatron import get_args
-from megatron import get_num_microbatches
-from megatron import get_timers
-from megatron import mpu
-from megatron import p2p_communication
-from megatron.utils import unwrap_model
-from megatron.model import DistributedDataParallel as LocalDDP
-from megatron.model import Float16Module
-from megatron.model import ModelType
+from . import get_args
+from . import get_num_microbatches
+from . import get_timers
+from . import mpu
+from . import p2p_communication
+from .utils import unwrap_model
+from .model import DistributedDataParallel as LocalDDP
+from .model import Float16Module
+from .model import ModelType
 
 
 def get_forward_backward_func():

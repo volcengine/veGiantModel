@@ -23,9 +23,9 @@ import torch
 from apex.multi_tensor_apply import multi_tensor_applier
 import amp_C
 
-from megatron import get_timers
-from megatron import mpu
-from megatron import print_rank_0
+from veGiantModel.megatron import get_timers
+from veGiantModel.megatron import mpu
+from veGiantModel.megatron import print_rank_0
 
 from .clip_grads import clip_grad_norm_fp32, count_zeros_fp32
 

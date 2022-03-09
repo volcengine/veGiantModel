@@ -20,8 +20,8 @@ import time
 import numpy as np
 import torch
 
-from megatron import print_rank_0
-from megatron import mpu
+from veGiantModel.megatron import print_rank_0
+# from megatron import mpu
 
 
 class BlendableDataset(torch.utils.data.Dataset):

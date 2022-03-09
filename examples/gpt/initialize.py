@@ -157,7 +157,7 @@ def initialize_pipeline(model, optimizer, train_dataset_provider, lr_scheduler_b
 
 
 def initialize_distributed(num_stages, mp_size, distributed_backend='nccl'):
-    veGiantModel.init_distribute(num_stages=num_stages, mp_size=mp_size, distributed_backend=distributed_backend)
+    veGiantModel.init_distributed(num_stages=num_stages, mp_size=mp_size, distributed_backend=distributed_backend)
 
 def initialize_megatron(extra_args_provider=None, args_defaults={}):
     veGiantModel.initialize_megatron(extra_args_provider=extra_args_provider, args_defaults=args_defaults)

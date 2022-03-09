@@ -19,8 +19,8 @@ from abc import abstractmethod
 import torch
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 
-from megatron import get_args
-from megatron import mpu
+from veGiantModel.megatron import get_args
+from veGiantModel.megatron import mpu
 from .module import MegatronModule
 
 

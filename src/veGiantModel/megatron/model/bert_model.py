@@ -17,16 +17,16 @@
 
 import torch
 
-from megatron import get_args
-from megatron import mpu
-from megatron.model.enums import AttnMaskType
-from megatron.model.language_model import parallel_lm_logits
-from megatron.model.language_model import get_language_model
-from megatron.model import LayerNorm
-from megatron.model.utils import openai_gelu, erf_gelu
-from megatron.model.utils import get_linear_layer
-from megatron.model.utils import init_method_normal
-from megatron.model.utils import scaled_init_method_normal
+from veGiantModel.megatron import get_args
+from veGiantModel.megatron import mpu
+from .enums import AttnMaskType
+from .language_model import parallel_lm_logits
+from .language_model import get_language_model
+from . import LayerNorm
+from .utils import openai_gelu, erf_gelu
+from .utils import get_linear_layer
+from .utils import init_method_normal
+from .utils import scaled_init_method_normal
 from .module import MegatronModule
 
 def bert_extended_attention_mask(attention_mask):

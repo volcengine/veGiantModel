@@ -11,11 +11,10 @@
 
 import torch
 
-from . import mpu
 from .distributed import *
 from .engine.engine import veGiantModelEngine
 from .initialize import init_distributed, initialize_megatron
-from megatron.model import utils
+from .megatron.model import utils
 
 __all__ = ['init_distributed', 'initialize_megatron']
 

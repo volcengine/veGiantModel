@@ -19,7 +19,7 @@ import math
 
 import torch
 
-from megatron import get_args
+# from megatron import get_args
 
 def init_method_normal(sigma):
     """Init method based on N(0, sigma)."""

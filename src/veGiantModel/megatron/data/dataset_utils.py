@@ -26,13 +26,13 @@ import collections
 import numpy as np
 import torch
 
-from megatron import (
+from veGiantModel.megatron import (
     get_args,
     mpu,
     print_rank_0
 )
-from megatron.data.blendable_dataset import BlendableDataset
-from megatron.data.indexed_dataset import make_dataset as make_indexed_dataset
+from .blendable_dataset import BlendableDataset
+from .indexed_dataset import make_dataset as make_indexed_dataset
 
 DSET_TYPE_BERT = 'standard_bert'
 DSET_TYPE_ICT = 'ict'

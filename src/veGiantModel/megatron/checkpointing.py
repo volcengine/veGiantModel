@@ -22,7 +22,7 @@ import numpy as np
 
 import torch
 
-from megatron import (get_args,
+from . import (get_args,
                       mpu,
                       print_rank_0,
                       update_num_microbatches,
