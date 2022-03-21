@@ -344,9 +344,8 @@ def train(engine, optimizer, lr_scheduler):
     log_dist(f' >>>> start training', ranks=[-1])
     while iteration < args.train_iters:
         engine.train_batch(train_data_iterator)
-        # engine.eval_batch(train_data_iterator)
-
-
+        iteration += 1
+        
 if __name__ == "__main__":
     pretrain(model_provider,
              args_defaults={'tokenizer_type': 'GPT2BPETokenizer'})
