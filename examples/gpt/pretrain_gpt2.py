@@ -12,7 +12,7 @@ _giantModel_dir = os.path.join(_cwd, '../../src')
 sys.path.append(_giantModel_dir)
 
 from initialize import initialize_megatron, initialize_pipeline
-from gpt_piped import GPTModelPiped
+from veGiantModel.model.gpt_piped import GPTModelPiped
 
 from megatron import get_args, mpu
 from megatron import get_timers
@@ -257,6 +257,7 @@ def lr_scheduler_builder(optimizer):
 def pretrain(model_provider, args_defaults={}):
     initialize_megatron(args_defaults=args_defaults)
     timers = get_timers()
+    args = get_args()
 
     # Model, optimizer, and learning rate.
     timers('model and optimizer').start()
@@ -267,7 +268,16 @@ def pretrain(model_provider, args_defaults={}):
     # Print setup timing.
     print_rank_0('done with setups ...')
     print_rank_0('training ...')
+    if args.load_megatron is not None:
+        engine.load_megatron_checkpoint(args.load_megatron,
+                                        optimizer=optimizer,
+                                        lr_scheduler=lr_scheduler,
+                                        num_layers=args.num_layers)
+    elif args.load is not None:
+        engine.load_checkpoint(args.load)
+    args.iteration = engine.global_steps
 
+    
     train(engine, optimizer, lr_scheduler)
 
 def traing_log(loss_dict, iteration):
@@ -326,7 +336,6 @@ def train(engine, optimizer, lr_scheduler):
 
     # Iterations.
     iteration = args.iteration
-
     timers('interval time').start()
 
     train_data_iterator, valid_data_iterator, test_data_iterator \
@@ -335,6 +344,8 @@ def train(engine, optimizer, lr_scheduler):
     log_dist(f' >>>> start training', ranks=[-1])
     while iteration < args.train_iters:
         engine.train_batch(train_data_iterator)
+        # engine.eval_batch(train_data_iterator)
+
 
 if __name__ == "__main__":
     pretrain(model_provider,

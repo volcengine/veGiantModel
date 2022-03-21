@@ -11,7 +11,7 @@ from .launcher.launch import launch_bps
 from deepspeed.utils import log_dist
 import logging
 
-
+_GLOBAL_EXTRA_ARGS = None
 
 def add_byte_giant_model_customize_args(parser):
     import deepspeed
@@ -47,9 +47,20 @@ def add_byte_giant_model_customize_args(parser):
 
     group.add_argument('--num-stages', type=int, default=1,
                        help='number of stages')
+
+    group.add_argument('--load-megatron', type=str, default=None,
+                       help='Directory containing a model checkpoint in Megatron format.')
+    
+    if _GLOBAL_EXTRA_ARGS is not None:
+        parser = _GLOBAL_EXTRA_ARGS(parser)
+
     return parser
 
 def initialize_megatron(extra_args_provider=None, args_defaults={}):
+    if extra_args_provider is not None:
+        global _GLOBAL_EXTRA_ARGS
+        _GLOBAL_EXTRA_ARGS = extra_args_provider
+
     set_global_variables(extra_args_provider=add_byte_giant_model_customize_args, args_defaults=args_defaults)
     args = get_args()
     init_distribute(args.num_stages, args.model_parallel_size)

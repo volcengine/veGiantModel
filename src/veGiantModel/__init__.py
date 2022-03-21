@@ -13,6 +13,7 @@ from . import patcher
 from .engine.engine import VeGiantModelEngine
 from .initialize import initialize_megatron, init_distribute
 from .distributed import *
+from .module import *
 
 def initialize(args,
                model,

@@ -36,16 +36,6 @@ ds_config='{
     "gradient_accumulation_steps": 2,
     "steps_per_print": 1,
     "gradient_clipping": 1.0,
-    "zero_optimization": {
-      "stage": 0,
-      "allgather_partitions": true,
-      "allgather_bucket_size": 500000000,
-      "overlap_comm": true,
-      "reduce_scatter": true,
-      "reduce_bucket_size": 500000000,
-      "contiguous_gradients" : true,
-      "cpu_offload": false
-    },
     "fp16": {
       "enabled": true,
       "loss_scale": 0,
@@ -95,5 +85,6 @@ python3 -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --config_param "$ds_config" \
        --fp16 \
        --partition_method "type:ParallelTransformerLayerPiped" \
+       --use-checkpoint-lr-scheduler \
        $@
 set +x

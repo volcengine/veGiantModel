@@ -16,6 +16,8 @@ from deepspeed.runtime.dataloader import RepeatingLoader
 
 from deepspeed.runtime.pipe.module import PipelineModule, PipelineError
 from deepspeed.runtime.pipe.engine import PipelineEngine
+from util.checkpoint_util import load_megatron_model_state, get_ckpt_name
+
 from . import p2p
 from . import schedule
 try:
@@ -28,8 +30,6 @@ from .module import VeGiantModule
 from deepspeed.utils import log_dist
 import logging
 from torch._six import inf
-
-# from inspect import signature
 
 LOG_STAGE = -2
 DATA_PARALLEL_ID = -2
@@ -310,6 +310,7 @@ class VeGiantModelEngine(PipelineEngine):
             os.environ['DMLC_WORKER_ID'] = str(self.global_rank)
             bps.init(lazy=False)
             print(f'bps init DONE', flush=True)
+        self._read_in_all_rank = False
 
 
     def _profiling_func_exit(self):
@@ -400,6 +401,7 @@ class VeGiantModelEngine(PipelineEngine):
         self.module.train()
         self.train()
         self.total_loss = None
+        self._compute_loss = True
 
         # Do the work
         self.timers('train_batch').start()
@@ -456,7 +458,7 @@ class VeGiantModelEngine(PipelineEngine):
         self.result_dict['loss'] = self.agg_train_loss
         return self.result_dict
 
-    def eval_batch(self, data_iter):
+    def eval_batch(self, data_iter, compute_loss=True, reduce_output='avg', read_in_all_rank=False):
         """Evaluate the pipeline on a batch of data from ``data_iter``. The
         engine will evaluate ``self.train_batch_size()`` total samples
         collectively across all workers.
@@ -487,6 +489,9 @@ class VeGiantModelEngine(PipelineEngine):
         self.module.eval()
         self.eval()
         self.total_loss = None
+        eval_output = None
+        self._compute_loss = compute_loss
+        self._read_in_all_rank = read_in_all_rank
 
         # Use the provided data iterator
         train_iterator = self.data_iterator
@@ -502,25 +507,23 @@ class VeGiantModelEngine(PipelineEngine):
             sched = schedule.InferenceSchedule(micro_batches=self.micro_batches,
                                            stages=self.num_stages,
                                            stage_id=self.stage_id)
+        cmd = ','.join(str(x) for x in sched)
+        # log_dist(f'stage_id: {self.stage_id}, sched:{cmd}', ranks=[-1], level=logging.INFO)
         with torch.no_grad():
             self._exec_schedule(sched)
 
-        self.agg_eval_loss = self._aggregate_total_loss()
-        self.timers('eval_batch').stop()
-        # # XXX hack model attribute
-        # if hasattr(self.module, '_get_metrics'):
-        #     self.module._ref_model[0].metric = {'pscc': self._aggregate_metric()}
+        if self.is_last_stage():
+            eval_output = self._reduce_outputs(self.fwd_outputs, reduce=reduce_output)
 
-        # if self.global_rank == 0:
-        #     elapsed = self.timers('eval_batch').elapsed(reset=True)
-        #     iter_time = elapsed
-        #     print(f'loss: {self.agg_eval_loss:0.4f} '
-        #             f'iter time (s): {iter_time:0.3f} ')
+        if compute_loss:
+            eval_output = self._bcast_pipe_scalar(eval_output)
+
+        self.timers('eval_batch').stop()
 
         if self.tensorboard_enabled():
             if self.global_rank == 0:
                 self.summary_events = [(f'Train/Samples/eval_loss',
-                                        self.agg_eval_loss.mean().item(),
+                                        eval_output.mean().item(),
                                         self.global_samples)]
                 for event in self.summary_events:  # write_summary_events
                     self.summary_writer.add_scalar(event[0], event[1], event[2])
@@ -530,10 +533,8 @@ class VeGiantModelEngine(PipelineEngine):
         self.set_dataiterator(train_iterator)
 
         # Reset any buffers that may have been populated during the forward passes.
-        #ds_checkpointing.reset()
         self.first_eval = False
-        self.result_dict['loss'] = self.agg_eval_loss
-        return self.result_dict
+        return eval_output
 
     def is_first_stage(self):
         """True if this process is in the first stage in the pipeline."""
@@ -542,6 +543,55 @@ class VeGiantModelEngine(PipelineEngine):
     def is_last_stage(self):
         """True if this process is in the last stage in the pipeline."""
         return self.stage_id == self.num_stages - 1
+
+    def _reduce_outputs(self, outputs, reduce='avg', reduce_dp=True):
+        if reduce is None:
+            return outputs
+
+        if reduce.lower() == 'avg':
+            # first sum over all microbatches
+            if torch.is_tensor(outputs[0]):
+                reduced = sum(outputs)
+            else:
+                assert isinstance(outputs, (list, tuple))
+                reduced = [torch.zeros_like(o) for o in outputs[0]]
+                for idx, out in outputs:
+                    reduced[idx] += out
+
+            # Average over the microbatches
+            reduced = self._scale_loss(reduced)
+
+            # Average over DP groups
+            if reduce_dp and self.is_data_parallel:
+                if torch.is_tensor(reduced):
+                    dist.all_reduce(reduced, group=self.mpu.get_data_parallel_group())
+                    reduced /= self.dp_world_size
+                else:
+                    for idx in range(len(reduced)):
+                        dist.all_reduce(reduced[idx],
+                                        group=self.mpu.get_data_parallel_group())
+                        reduced[idx] /= self.dp_world_size
+
+            return reduced
+        else:
+            raise NotImplementedError(f'reduction type {reduce} not supported.')
+
+    def _bcast_pipe_scalar(self, data, src_rank=None, dtype=torch.float32):
+        # Default to last stage (e.g., for broadcasting loss)
+        if src_rank is None:
+            src_rank = self.grid.stage_to_global(self.num_stages - 1)
+        assert src_rank in self.grid.pp_group
+
+        if self.global_rank == src_rank:
+            result = data.clone().detach()
+        else:
+            result = torch.Tensor([0.]).type(dtype).to(self.device)
+
+        dist.broadcast(tensor=result,
+                       src=src_rank,
+                       group=self.mpu.get_pipe_parallel_group())
+
+        return result
 
     def _aggregate_metric(self):
         # Scale loss, average among DP ranks, and bcast loss to the rest of my DP group
@@ -624,8 +674,6 @@ class VeGiantModelEngine(PipelineEngine):
 
     def set_batch_fn(self, fn):
         self.batch_fn = fn
-        # sig = signature(fn)
-        # params = sig.parameters
 
     def is_gradient_accumulation_boundary(self):
         """True if the engine is executing a gradient reduction or optimizer step instruction.
@@ -650,9 +698,8 @@ class VeGiantModelEngine(PipelineEngine):
             mp_rank = 0
 
         batch = None
-
         # Only MP rank 0 loads the data.
-        if mp_rank == 0:
+        if self._read_in_all_rank or mp_rank == 0:
             if self.data_iterator is None:
                 raise ValueError(f"RANK={self.global_rank} no data iterator provided.")
             batch = next(self.data_iterator)
@@ -702,7 +749,7 @@ class VeGiantModelEngine(PipelineEngine):
 
         # Optionally compute loss and metrics on the last device
         if self.is_last_stage():
-            if self.loss_model is not None:
+            if self._compute_loss and self.loss_model is not None:
                 labels = self.pipe_buffers['labels'][buffer_id]
                 ret = self.loss_model(outputs, labels)
                 if isinstance(ret, dict):
@@ -716,10 +763,13 @@ class VeGiantModelEngine(PipelineEngine):
             # get metric from self.module
 
             if isinstance(self.loss, torch.Tensor):
+                self.fwd_outputs.append(self.loss.detach())
                 if self.total_loss is None:
                     self.total_loss = torch.zeros_like(self.loss)
                 self.total_loss += self.loss.detach()
             else:
+                self.fwd_outputs.append([l.detach() for l in self.loss])
+
                 if self.total_loss is None:
                     self.total_loss = [torch.zeros_like(l) for l in self.loss]
                 for idx, l in enumerate(self.loss):
@@ -789,9 +839,8 @@ class VeGiantModelEngine(PipelineEngine):
         if self.wall_clock_breakdown():
             self.timers('batch_input').start()
 
-        batch = self._next_batch()
-
         if self.is_first_stage():
+            batch = self._next_batch()
             loaded = None
             if torch.is_tensor(batch[0]):
                 loaded = batch[0].clone().to(self.device).detach()
@@ -813,7 +862,8 @@ class VeGiantModelEngine(PipelineEngine):
 
             self.pipe_buffers['inputs'][buffer_id] = loaded
 
-        if self.is_last_stage():
+        if self.is_last_stage() and self._compute_loss:
+            batch = self._next_batch()
             loaded = batch[1]
             if torch.is_tensor(batch[1]):
                 loaded = batch[1].to(self.device)
@@ -996,7 +1046,7 @@ class VeGiantModelEngine(PipelineEngine):
         elif isinstance(outputs, (tuple, list)):
             for idx, buffer in enumerate(outputs):
                 if DS_PIPE_VERBOSE >= 3:
-                    print(f'DS BPS_SEND tensors {idx}/{len(outputs)}', flush=True)
+                    log_dist(f'DS BPS_SEND tensors {idx}/{len(outputs)}, next_stage={self.next_stage} sum={self._mp_slice(buffer.contiguous()).sum()}', ranks=[-1])
                 p2p.bps_send(self._mp_slice(buffer.contiguous()), self.next_stage,
                              name, index=idx, async_op=True)
         else:
@@ -1027,10 +1077,10 @@ class VeGiantModelEngine(PipelineEngine):
             elif isinstance(outputs, (tuple, list)):
                 for idx, buffer in enumerate(outputs):
                     if DS_PIPE_VERBOSE >= 3:
-                        print(f'DS BPS_SEND tensors {idx}/{len(outputs)} start', flush=True)
+                        log_dist(f'DS BPS_SEND tensors {idx}/{len(outputs)} start', ranks=[-1])
                     p2p.bps_send(buffer.contiguous(), self.next_stage, name, index=idx, async_op=True)
                     if DS_PIPE_VERBOSE >= 3:
-                        print(f'DS BPS_SEND tensors {idx}/{len(outputs)} end', flush=True)
+                        log_dist(f'DS BPS_SEND tensors {idx}/{len(outputs)} end', ranks=[-1])
             else:
                 raise NotImplementedError('Could not send output of type '
                                           f'{type(outputs)}')
@@ -1263,6 +1313,8 @@ class VeGiantModelEngine(PipelineEngine):
             assert isinstance(recv_buff, (tuple, list))
             for idx, buffer in enumerate(recv_buff):
                 assert torch.is_tensor(buffer)
+                if DS_PIPE_VERBOSE >= 3:
+                    log_dist(f'DS BPS_RECV tensors {idx}/{len(recv_buff)}, prev_stage: {self.prev_stage}', ranks=[-1])
                 p2p.bps_recv(self._mp_view(buffer, self.mp_id), self.prev_stage,
                              name, index=idx, async_op=True)
 
@@ -1545,6 +1597,8 @@ class VeGiantModelEngine(PipelineEngine):
 
     def _exec_schedule(self, pipe_schedule):
         self._reserve_pipe_buffers(pipe_schedule.num_pipe_buffers())
+        self.fwd_outputs = []
+
         # For each step in the schedule
         has_optim_step = False
         for step_cmds in pipe_schedule:
@@ -1567,3 +1621,129 @@ class VeGiantModelEngine(PipelineEngine):
         # check for anormalies
         if isinstance(pipe_schedule, (schedule.BytePSTrainSchedule, schedule.TrainSchedule)):
             assert has_optim_step
+
+    def broadcast_last_to_first(self, data):
+        if self.is_last_stage():
+            src_rank = self.global_rank
+        else:
+            src_rank = self.grid.stage_to_global(self.num_stages - 1)
+        
+        dist.broadcast(tensor=data,
+                        src=src_rank,
+                        group=self.grid.get_pipe_parallel_group())
+
+    def broadcast_first_to_last(self, data):
+        if self.is_first_stage():
+            src_rank = self.global_rank
+        else:
+            src_rank = self.grid.stage_to_global(0)
+        
+        dist.broadcast(tensor=data,
+                        src=src_rank,
+                        group=self.grid.get_pipe_parallel_group())
+
+
+    def load_megatron_checkpoint(self,
+                                 load_dir,
+                                 tag=None,
+                                 load_module_strict=True,
+                                 load_optimizer_states=True,
+                                 load_lr_scheduler_states=True,
+                                 optimizer=None,
+                                 lr_scheduler=None,
+                                 num_layers=None):
+
+        load_path = get_ckpt_name(load_dir)
+        if not os.path.exists(load_path):
+            logger.warn(
+                'Client provided checkpoint load path: {} does not exist ... skip checkpoint load'
+                .format(load_path))
+            return None, None
+
+        log_dist(f'loading checkpoint: {load_path}', ranks=[-1])
+        checkpoint = torch.load(load_path, map_location=lambda storage, loc: storage)
+        assert num_layers, num_layers
+        load_optimizer = True if optimizer and load_optimizer_states else False
+
+        param_indices = load_megatron_model_state(self.module, num_layers, checkpoint, load_optimizer, load_module_strict)
+
+        if lr_scheduler and load_lr_scheduler_states:
+            if 'start_lr' not in checkpoint['lr_scheduler']:
+                logger.info(f'rank: {self.global_rank} start_lr not found in the checkpoint. Converting lr schedule from Megatron lr scheduler..')
+                checkpoint['lr_scheduler']['start_lr'] = checkpoint['lr_scheduler']['max_lr']
+                checkpoint['lr_scheduler']['warmup_iter'] = checkpoint['lr_scheduler']['warmup_steps']
+                checkpoint['lr_scheduler']['num_iters'] = checkpoint['iteration']
+                checkpoint['lr_scheduler']['last_iter'] = checkpoint['iteration'] - 1
+                checkpoint['lr_scheduler']['end_iter'] = checkpoint['lr_scheduler']['num_steps']
+            lr_scheduler.load_state_dict(checkpoint['lr_scheduler'])
+
+        import megatron
+        args = megatron.get_args()
+        if load_optimizer:
+            initial_loss_scale = 1.0 * 2**16
+            checkpoint['optimizer']['cur_scale'] = initial_loss_scale
+            checkpoint['optimizer']['cur_iter'] = checkpoint['iteration']
+            checkpoint['optimizer']['dynamic_loss_scale'] = True
+            checkpoint['optimizer']['last_overflow_iter'] = checkpoint['iteration'] - 1
+            checkpoint['optimizer']['scale_factor'] = 2.0
+            import deepspeed
+            assert isinstance(optimizer, deepspeed.runtime.fp16.unfused_optimizer.FP16_UnfusedOptimizer)
+            num_param_groups = len(optimizer.optimizer.param_groups)
+
+            # set up the subset of optimizer states that this pipeline stage cares
+            ckpt_param_groups = checkpoint['optimizer']['optimizer']['param_groups']
+            ckpt_states = checkpoint['optimizer']['optimizer']['state']
+            ckpt_fp32_params = checkpoint['optimizer']['fp32_from_fp16_params']
+
+            # all relevant parameter indices, including the ones with weight_decay, and the ones without wd.
+            all_param_indices = []
+            for group_idx in range(num_param_groups):
+                all_param_indices.extend(param_indices[group_idx])
+                ckpt_fp32_subset = [p for idx, p in enumerate(ckpt_fp32_params[group_idx]) if idx in param_indices[group_idx]]
+                # select fp32 master weights subset from the Megatron checkpoint
+                checkpoint['optimizer']['fp32_from_fp16_params'] = ckpt_fp32_subset
+                ckpt_param_groups[group_idx]["params"] = list(param_indices[group_idx])
+            checkpoint['optimizer']['fp32_groups'] = checkpoint['optimizer']['fp32_from_fp16_params']
+
+            # select state subset from the Megatron checkpoint
+            ckpt_states_subset = type(ckpt_states)()
+            for idx, state in ckpt_states.items():
+                if idx not in all_param_indices:
+                    state['step'] = checkpoint['iteration']
+                    ckpt_states_subset[idx] = state
+            checkpoint['optimizer']['optimizer']['state'] = ckpt_states_subset
+            checkpoint['optimizer']['optimizer_state_dict'] = checkpoint['optimizer']['optimizer']
+
+            # other misc optimizer information
+            checkpoint['optimizer']['scale_window'] = args.loss_scale_window
+            optimizer.load_state_dict(checkpoint['optimizer'])
+            logger.info(f'rank: {self.global_rank} loaded optimizer state from Megatron checkpoint.')
+
+        # random states
+        import random, numpy as np
+        self.global_steps = checkpoint['iteration']
+        random.setstate(checkpoint['random_rng_state'])
+        np.random.set_state(checkpoint['np_rng_state'])
+        torch.set_rng_state(checkpoint['torch_rng_state'])
+        torch.cuda.set_rng_state(checkpoint['cuda_rng_state'])
+        megatron.mpu.get_cuda_rng_tracker().set_states(checkpoint['rng_tracker_states'])
+        logger.info(f'rank: {self.global_rank} loaded randomness state from Megatron checkpoint. DONE loading all states')
+        return self.global_steps
+
+
+    def _get_ckpt_name(self, checkpoints_path, tag):
+        mp_rank = 0 if self.mpu is None else self.mpu.get_model_parallel_rank()
+        pp_rank = 0 if self.mpu is None else self.mpu.get_pipe_parallel_rank()
+        if self.zero_optimization_partition_weights():
+            filename = 'zero_pp_rank_{}'.format(
+                torch.distributed.get_rank(group=self.optimizer.dp_process_group))
+            ckpt_name = os.path.join(
+                checkpoints_path,
+                str(tag),
+                filename + '_mp_rank_{:02d}_pp_rank_{:02d}'.format(mp_rank, pp_rank) + '_model_states.pt')
+        else:
+            ckpt_name = os.path.join(
+                checkpoints_path,
+                str(tag),
+                'mp_rank_{:02d}_pp_rank_{:02d}'.format(mp_rank, pp_rank) + '_model_states.pt')
+        return ckpt_name

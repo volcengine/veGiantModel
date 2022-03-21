@@ -10,6 +10,7 @@ from megatron.model.utils import init_method_normal
 from megatron.model.utils import scaled_init_method_normal
 from megatron.module import MegatronModule
 from megatron.utils import get_ltor_masks_and_position_ids
+from megatron.fp16 import fp32_to_fp16
 
 from deepspeed.pipe import LayerSpec, TiedLayerSpec
 from megatron import get_tokenizer
@@ -17,11 +18,11 @@ from veGiantModel.engine.module import VeGiantModule
 import veGiantModel
 
 class GPTModelPiped(VeGiantModule):
-    def __init__(self):
+    def __init__(self, num_tokentypes=0, forward_parallel_output=True):
         args = get_args()
         self.fp16_lm_cross_entropy = args.fp16_lm_cross_entropy
         self.tokenizer = get_tokenizer()
-        self.parallel_output = True
+        self.forward_parallel_output = forward_parallel_output
 
         self.num_layers = args.num_layers
         self.hidden_size = args.hidden_size
@@ -30,10 +31,9 @@ class GPTModelPiped(VeGiantModule):
         self.scale_init_method = scaled_init_method_normal(args.init_method_std,
                                                            args.num_layers)
 
-        self.num_tokentypes = 0
+        self.num_tokentypes = num_tokentypes
 
         layers = []
-        layers.append(lambda x: self._get_batch(x))
         layers.append(TiedLayerSpec("SharedEmbedding",
                                     EmbeddingPiped,
                                     self.hidden_size,
@@ -62,6 +62,7 @@ class GPTModelPiped(VeGiantModule):
                                     self.hidden_size,
                                     args.padded_vocab_size,
                                     self.init_method,
+                                    self.forward_parallel_output,
                                     tied_weight_attr='embedding_weight'))
 
         super().__init__(layers=layers,
@@ -70,41 +71,14 @@ class GPTModelPiped(VeGiantModule):
                          grid=veGiantModel.distributed.get_grid(),
                          loss_fn=self.loss_fn)
         
-
-    # Data Preprocessing, copied from pretrain_gpt2.py
-    def _get_batch(self, data):
-        """Generate a batch"""
-        args = get_args()
-        # Unpack.
-        tokens = data
-
-        attention_mask, _, position_ids = get_ltor_masks_and_position_ids(
-            tokens,
-            self.tokenizer.eod,
-            args.reset_position_ids,
-            args.reset_attention_mask,
-            args.eod_mask_loss)
-
-        return (tokens.to(device="cuda"),
-                position_ids.to(device="cuda"),
-                attention_mask.to(device="cuda"))
-
-    def loss_fn(self, inputs, data):
-        tokens = data[0]
-        target = data[1]
-        args = get_args()
-        _, loss_mask, _ = get_ltor_masks_and_position_ids(
-            tokens,
-            self.tokenizer.eod,
-            args.reset_position_ids,
-            args.reset_attention_mask,
-            args.eod_mask_loss)
+    def loss_fn(self, inputs, labels):
+        labels, loss_mask = labels[0], labels[1]
 
         if self.fp16_lm_cross_entropy:
             assert inputs.dtype == torch.half
-            loss = mpu.vocab_parallel_cross_entropy(inputs, target)
+            loss = veGiantModel.vocab_parallel_cross_entropy(inputs, labels)
         else:
-            loss = mpu.vocab_parallel_cross_entropy(inputs.float(), target)
+            loss = veGiantModel.vocab_parallel_cross_entropy(inputs.float(), labels)
         loss_mask = loss_mask.view(-1)
         loss_avg = torch.sum(loss.view(-1) * loss_mask) / loss_mask.sum()
         if loss.dtype == torch.half:
@@ -113,6 +87,7 @@ class GPTModelPiped(VeGiantModule):
         return loss_avg
 
     def batch_fn(self, batch, is_train:bool):
+        args = get_args()
         if batch is not None:
             data = {'text': torch.tensor(batch['text'].numpy())}
         else:
@@ -123,27 +98,36 @@ class GPTModelPiped(VeGiantModule):
 
         data_b = mpu.broadcast_data(keys, data, datatype)
 
+        # Unpack.
         tokens_ = data_b['text'].long()
-        tokens_write = tokens_
         labels = tokens_[:, 1:].contiguous()
-        tokens_ = tokens_[:, :-1].contiguous()
-        tokens_2 = torch.unsqueeze(tokens_, 0)
-        data2 = torch.cat((tokens_2, labels[None, :, :]), dim=0)
-        data = []
-        data.append(tokens_)
-        data.append(data2)
-        return data
+        tokens = tokens_[:, :-1].contiguous()
+
+        # Get the masks and postition ids.
+        attention_mask, loss_mask, position_ids = get_ltor_masks_and_position_ids(
+            tokens,
+            self.tokenizer.eod,
+            args.reset_position_ids,
+            args.reset_attention_mask,
+            args.eod_mask_loss)
+
+        # unpack data
+        if args.fp16:
+            # cast to fp16 because pipeline parallelism skips the FP16 wrapper.
+            return fp32_to_fp16((tokens, position_ids, attention_mask)), fp32_to_fp16((labels, loss_mask))
+        else:
+            return (tokens, position_ids, attention_mask), (labels, loss_mask)
 
 class LMLogitsPiped(MegatronModule):
-    def __init__(self, hidden_size, vocab_size, init_method):
+    def __init__(self, hidden_size, vocab_size, init_method, parallel_output=True):
         super().__init__()
-        self.word_embeddings = mpu.VocabParallelEmbedding(
+        self.word_embeddings = veGiantModel.VocabParallelEmbedding(
             vocab_size, hidden_size, init_method=init_method)
         self.embedding_weight = self.word_embeddings.weight
+        self.parallel_output = parallel_output
 
     def forward(self, lm_output):
-        return parallel_lm_logits(lm_output, self.embedding_weight, True)
-
+        return parallel_lm_logits(lm_output, self.embedding_weight, parallel_output=self.parallel_output)
 
 class EmbeddingPiped(Embedding):
     def __init__(self,

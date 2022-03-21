@@ -2,6 +2,7 @@
 from .dense import ColumnSerialLinear, ColumnParallelLinear
 from .dense import RowSerialLinear, RowParallelLinear, MockModule
 from .dense import ColumnParallelLinearTranspose, ColumnSerialLinearTranspose
+from .dense import vocab_parallel_cross_entropy, VocabParallelEmbedding
 
 __all__ = ['ColumnSerialLinear',
            'ColumnParallelLinear',
@@ -9,4 +10,6 @@ __all__ = ['ColumnSerialLinear',
            'ColumnSerialLinearTranspose',
            'RowSerialLinear',
            'RowParallelLinear',
-           'MockModule']
+           'MockModule',
+           'vocab_parallel_cross_entropy',
+           'VocabParallelEmbedding']

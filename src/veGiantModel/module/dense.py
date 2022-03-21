@@ -16,6 +16,12 @@
 import torch
 import torch.nn as nn
 import torch.autograd as autograd
+import torch.nn.functional as F
+import torch.nn.init as init
+from torch.nn.parameter import Parameter
+
+from megatron import get_args
+from megatron import mpu
 
 # try:
 #     import veGiantModel
@@ -561,3 +567,220 @@ class ColumnSerialLinearTranspose(MockModule):
 
     def extra_repr(self):
         return 'in_features={}, out_features={}, head_num={}'.format(self.in_features, self.out_features, self.head_num)
+
+def vocab_range_from_per_partition_vocab_size(per_partition_vocab_size,
+                                                  rank, world_size):
+    index_f = rank * per_partition_vocab_size
+    index_l = index_f + per_partition_vocab_size
+    return index_f, index_l
+
+def vocab_range_from_global_vocab_size(global_vocab_size, rank, world_size):
+    per_partition_vocab_size = mpu.divide(global_vocab_size, world_size)
+    return vocab_range_from_per_partition_vocab_size(
+        per_partition_vocab_size, rank, world_size)
+
+class _VocabParallelCrossEntropy(autograd.Function):
+    @staticmethod
+    def forward(ctx, vocab_parallel_logits, target):
+        import veGiantModel
+        # Maximum value along vocab dimension across all GPUs.
+        logits_max = torch.max(vocab_parallel_logits, dim=-1)[0]
+        torch.distributed.all_reduce(logits_max,
+                                     op=torch.distributed.ReduceOp.MAX,
+                                     group=veGiantModel.distributed.get_model_parallel_group())
+        # Subtract the maximum value.
+        vocab_parallel_logits.sub_(logits_max.unsqueeze(dim=-1))
+
+        # Get the partition's vocab indecies
+        get_vocab_range = vocab_range_from_per_partition_vocab_size
+        partition_vocab_size = vocab_parallel_logits.size()[-1]
+        rank = veGiantModel.distributed.get_model_parallel_rank()
+        world_size = veGiantModel.distributed.get_model_parallel_world_size()
+        vocab_start_index, vocab_end_index = get_vocab_range(
+            partition_vocab_size, rank, world_size)
+
+        # Create a mask of valid vocab ids (1 means it needs to be masked).
+        target_mask = (target < vocab_start_index) | (target >= vocab_end_index)
+        masked_target = target.clone() - vocab_start_index
+        masked_target[target_mask] = 0
+
+        # Get predicted-logits = logits[target].
+        # For Simplicity, we convert logits to a 2-D tensor with size
+        # [*, partition-vocab-size] and target to a 1-D tensor of size [*].
+        logits_2d = vocab_parallel_logits.view(-1, partition_vocab_size)
+        masked_target_1d = masked_target.view(-1)
+        arange_1d = torch.arange(start=0, end=logits_2d.size()[0],
+                                 device=logits_2d.device)
+        predicted_logits_1d = logits_2d[arange_1d, masked_target_1d]
+        predicted_logits_1d = predicted_logits_1d.clone().contiguous()
+        predicted_logits = predicted_logits_1d.view_as(target)
+        predicted_logits[target_mask] = 0.0
+        # All reduce is needed to get the chunks from other GPUs.
+        torch.distributed.all_reduce(predicted_logits,
+                                     op=torch.distributed.ReduceOp.SUM,
+                                     group=veGiantModel.distributed.get_model_parallel_group())
+
+        # Sum of exponential of logits along vocab dimension across all GPUs.
+        exp_logits = vocab_parallel_logits
+        torch.exp(vocab_parallel_logits, out=exp_logits)
+        sum_exp_logits = exp_logits.sum(dim=-1)
+        torch.distributed.all_reduce(sum_exp_logits,
+                                     op=torch.distributed.ReduceOp.SUM,
+                                     group=veGiantModel.distributed.get_model_parallel_group())
+
+        # Loss = log(sum(exp(logits))) - predicted-logit.
+        loss = torch.log(sum_exp_logits) - predicted_logits
+
+        # Store softmax, target-mask and masked-target for backward pass.
+        exp_logits.div_(sum_exp_logits.unsqueeze(dim=-1))
+        ctx.save_for_backward(exp_logits, target_mask, masked_target_1d)
+
+        return loss
+
+    @staticmethod
+    def backward(ctx, grad_output):
+
+        # Retreive tensors from the forward path.
+        softmax, target_mask, masked_target_1d = ctx.saved_tensors
+
+        # All the inputs have softmax as thier gradient.
+        grad_input = softmax
+        # For simplicity, work with the 2D gradient.
+        partition_vocab_size = softmax.size()[-1]
+        grad_2d = grad_input.view(-1, partition_vocab_size)
+
+        # Add the gradient from matching classes.
+        arange_1d = torch.arange(start=0, end=grad_2d.size()[0],
+                                 device=grad_2d.device)
+        grad_2d[arange_1d, masked_target_1d] -= (
+            1.0 - target_mask.view(-1).float())
+
+        # Finally elementwise multiplication with the output gradients.
+        grad_input.mul_(grad_output.unsqueeze(dim=-1))
+
+        return grad_input, None
+
+
+def vocab_parallel_cross_entropy(vocab_parallel_logits, target):
+    """Helper function for the cross entropy."""
+    return _VocabParallelCrossEntropy.apply(vocab_parallel_logits, target)
+
+def _initialize_affine_weight_gpu(weight, init_method,
+                                  partition_dim, stride=1):
+    """Initialize affine weight for model parallel on GPU."""
+
+    weight.model_parallel = True
+    weight.partition_dim = partition_dim
+    weight.partition_stride = stride
+    
+    with mpu.get_cuda_rng_tracker().fork():
+        init_method(weight)
+
+
+def _initialize_affine_weight_cpu(weight, output_size, input_size,
+                                  per_partition_size, partition_dim,
+                                  init_method, stride=1,
+                                  return_master_weight=False):
+    import veGiantModel
+    """Initialize affine weight for model parallel.
+
+    Build the master weight on all processes and scatter
+    the relevant chunk."""
+
+    weight.model_parallel = True
+    weight.partition_dim = partition_dim
+    weight.partition_stride = stride
+
+    # Initialize master weight
+    master_weight = torch.empty(output_size, input_size,
+                                dtype=torch.float,
+                                requires_grad=False)
+    init_method(master_weight)
+    args = get_args()
+    master_weight = master_weight.to(dtype=args.params_dtype)
+
+    # Split and copy
+    per_partition_per_stride_size = mpu.divide(per_partition_size, stride)
+    weight_list = torch.split(master_weight, per_partition_per_stride_size,
+                              dim=partition_dim)
+    rank = veGiantModel.distributed.get_model_parallel_rank()
+    world_size = veGiantModel.distributed.get_model_parallel_world_size()
+    my_weight_list = weight_list[rank::world_size]
+
+    with torch.no_grad():
+        torch.cat(my_weight_list, dim=partition_dim, out=weight)
+    if return_master_weight:
+        return master_weight
+    return None
+
+class VocabParallelEmbedding(torch.nn.Module):
+    """Embedding parallelized in the vocabulary dimension.
+
+    This is mainly adapted from torch.nn.Embedding and all the default
+    values are kept.
+    Arguments:
+        num_embeddings: vocabulary size.
+        embedding_dim: size of hidden state.
+        init_method: method to initialize weights.
+    """
+
+    def __init__(self, num_embeddings, embedding_dim,
+                 init_method=init.xavier_normal_):
+        super(VocabParallelEmbedding, self).__init__()
+        import veGiantModel
+        # Keep the input dimensions.
+        self.num_embeddings = num_embeddings
+        self.embedding_dim = embedding_dim
+        # Set the detauls for compatibility.
+        self.padding_idx = None
+        self.max_norm = None
+        self.norm_type = 2.
+        self.scale_grad_by_freq = False
+        self.sparse = False
+        self._weight = None
+        self.model_parallel_size = veGiantModel.distributed.get_model_parallel_world_size()
+        # Divide the weight matrix along the vocaburaly dimension.
+        self.vocab_start_index, self.vocab_end_index = \
+            vocab_range_from_global_vocab_size(
+                self.num_embeddings, veGiantModel.distributed.get_model_parallel_rank(),
+                self.model_parallel_size)
+        self.num_embeddings_per_partition = self.vocab_end_index - \
+            self.vocab_start_index
+
+        # Allocate weights and initialize.
+        args = get_args()
+        if args.use_cpu_initialization:
+            self.weight = Parameter(torch.empty(
+                self.num_embeddings_per_partition, self.embedding_dim,
+                dtype=args.params_dtype))
+            _initialize_affine_weight_cpu(
+                self.weight, self.num_embeddings, self.embedding_dim,
+                self.num_embeddings_per_partition, 0, init_method)
+        else:
+            self.weight = Parameter(torch.empty(
+                self.num_embeddings_per_partition, self.embedding_dim,
+                device=torch.cuda.current_device(), dtype=args.params_dtype))
+            _initialize_affine_weight_gpu(self.weight, init_method,
+                                          partition_dim=0, stride=1)
+
+    def forward(self, input_):
+        if self.model_parallel_size > 1:
+            # Build the mask.
+            input_mask = (input_ < self.vocab_start_index) | \
+                         (input_ >= self.vocab_end_index)
+            # Mask the input.
+            masked_input = input_.clone() - self.vocab_start_index
+            masked_input[input_mask] = 0
+        else:
+            masked_input = input_
+            # Get the embeddings.
+        output_parallel = F.embedding(masked_input, self.weight,
+                                      self.padding_idx, self.max_norm,
+                                      self.norm_type, self.scale_grad_by_freq,
+                                      self.sparse)
+        # Mask the output embedding.
+        if self.model_parallel_size > 1:
+            output_parallel[input_mask, :] = 0.0
+        # Reduce across all the model parallel GPUs.
+        output = mpu.reduce_from_model_parallel_region(output_parallel)
+        return output

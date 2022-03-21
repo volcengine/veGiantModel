@@ -6,11 +6,46 @@ from megatron import get_args, mpu
 from megatron.fp16 import FP16_Module
 from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
 from megatron.model import DistributedDataParallel as LocalDDP
-from megatron.model import get_params_for_weight_decay_optimization
+from megatron.model.transformer import LayerNorm
 from apex.optimizers import FusedAdam as Adam
+# from torch.optim import Adam
 from megatron.learning_rates import AnnealingLR
 from megatron import print_rank_0
 
+def get_params_for_weight_decay_optimization(module, weight_decay_names, no_weight_decay_names):
+    """Divide params into with-weight-decay and without-weight-decay groups.
+    Layernorms and baises will have no weight decay but the rest will.
+
+    This function also record the name of the parameters of each group.
+
+    """
+    weight_decay_params = {'params': []}
+    no_weight_decay_params = {'params': [], 'weight_decay': 0.0}
+
+    for module_name, module_ in module.named_modules():
+        if isinstance(module_, LayerNorm):
+            no_weight_decay_params['params'].extend(
+                [p for p in list(module_._parameters.values())
+                 if p is not None])
+            no_weight_decay_names.extend(
+                [module_name + '.' + n for n, p in list(module_._parameters.items())
+                if p is not None])
+        else:
+            # tied_modules.SharedEmbedding.embedding_weight is a duplicate of tied_modules.SharedEmbedding.embedding.weight
+            weight_decay_params['params'].extend(
+                [p for n, p in list(module_._parameters.items())
+                 if p is not None and n != 'bias' and module_name + '.' + n != 'tied_modules.SharedEmbedding.word_embeddings.weight'])
+            weight_decay_names.extend([module_name + '.' + n for n, p in list(module_._parameters.items())
+                 if p is not None and n != 'bias' and module_name + '.' + n != 'tied_modules.SharedEmbedding.word_embeddings.weight'])
+
+            no_weight_decay_params['params'].extend(
+                [p for n, p in list(module_._parameters.items())
+                 if p is not None and n == 'bias'])
+            no_weight_decay_names.extend(
+                [module_name + '.' + n for n, p in list(module_._parameters.items())
+                if p is not None and n == 'bias'])
+
+    return weight_decay_params, no_weight_decay_params
 
 def get_learning_rate_scheduler(optimizer, lr_scheduler_builder):
     """Build the learning rate scheduler."""
@@ -67,7 +102,11 @@ def get_optimizer(model):
     # Build parameter groups (weight decay and non-decay).
     while isinstance(model, (torchDDP, LocalDDP, FP16_Module)):
         model = model.module
-    param_groups = get_params_for_weight_decay_optimization(model)
+    weight_decay_names = []
+    no_weight_decay_names = []
+    param_groups = get_params_for_weight_decay_optimization(model, weight_decay_names, no_weight_decay_names)
+    setattr(args, 'weight_decay_names', weight_decay_names)
+    setattr(args, 'no_weight_decay_names', no_weight_decay_names)
 
     # Add model parallel attribute if it is not set.
     for param_group in param_groups:
