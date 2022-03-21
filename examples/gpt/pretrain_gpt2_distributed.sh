@@ -62,7 +62,6 @@ python3 -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --train-iters 500000 \
        --lr-decay-iters 450000 \
        --save $CHECKPOINT_PATH \
-       --load $CHECKPOINT_PATH \
        --data-path $DATA_PATH/openwebtext-gpt2_text_document \
        --vocab-file $DATA_PATH/gpt2-vocab.json \
        --merge-file $DATA_PATH/gpt2-merges.txt \
