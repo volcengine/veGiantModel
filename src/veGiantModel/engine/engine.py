@@ -1694,23 +1694,79 @@ class VeGiantModelEngine(PipelineEngine):
             ckpt_param_groups = checkpoint['optimizer']['optimizer']['param_groups']
             ckpt_states = checkpoint['optimizer']['optimizer']['state']
             ckpt_fp32_params = checkpoint['optimizer']['fp32_from_fp16_params']
+            ckpt_states_subset = type(ckpt_states)()
 
             # all relevant parameter indices, including the ones with weight_decay, and the ones without wd.
-            all_param_indices = []
-            for group_idx in range(num_param_groups):
-                all_param_indices.extend(param_indices[group_idx])
-                ckpt_fp32_subset = [p for idx, p in enumerate(ckpt_fp32_params[group_idx]) if idx in param_indices[group_idx]]
-                # select fp32 master weights subset from the Megatron checkpoint
-                checkpoint['optimizer']['fp32_from_fp16_params'] = ckpt_fp32_subset
-                ckpt_param_groups[group_idx]["params"] = list(param_indices[group_idx])
-            checkpoint['optimizer']['fp32_groups'] = checkpoint['optimizer']['fp32_from_fp16_params']
+            param_index_begin = 0
+            pp_rank = self.mpu.get_pipe_parallel_rank()
+            cross_group_param_size_list = []
+            with torch.no_grad():
+                if self.is_last_stage():
+                    ckpt_states_subset[0] = ckpt_states[0]
 
-            # select state subset from the Megatron checkpoint
-            ckpt_states_subset = type(ckpt_states)()
-            for idx, state in ckpt_states.items():
-                if idx not in all_param_indices:
-                    state['step'] = checkpoint['iteration']
-                    ckpt_states_subset[idx] = state
+                for group_idx in range(num_param_groups):
+                    contains_shared_embed = group_idx == 0 and self.is_last_stage()
+                    # param_size_tensor does not include the shared embed tensor
+                    param_size_tensor = torch.zeros(args.num_stages, dtype=torch.int32).cuda()
+                    param_size_tensor[pp_rank] = len(param_indices[group_idx])
+                    if contains_shared_embed:
+                        param_size_tensor[pp_rank] -= 1
+                    # get a global view of all tensor count
+                    torch.distributed.all_reduce(param_size_tensor, group=self.mpu.get_pipe_parallel_group())
+                    param_size_list = param_size_tensor.cpu().numpy().tolist()
+                    cross_group_param_size_list.extend(param_size_list)
+                    accumulate_param_size_list = []
+                    accumulate_param_size_list.append(0)
+                    for param_size in param_size_list:
+                        accumulate_param_size_list.append(accumulate_param_size_list[-1] + param_size)
+                    total_size = param_size_tensor.sum().cpu().numpy()
+                    ckpt_params_size = len(ckpt_param_groups[group_idx]["params"])
+                    assert total_size == ckpt_params_size, (group_idx, total_size, ckpt_params_size)
+                    ckpt_fp32_subset = [ckpt_fp32_params[group_idx][0]] if contains_shared_embed else []
+                    start_idx = accumulate_param_size_list[pp_rank]
+                    end_idx = accumulate_param_size_list[pp_rank + 1]
+                    ckpt_fp32_subset.extend(ckpt_fp32_params[group_idx][start_idx:end_idx])
+                    """ select fp32 master weights subset from the Megatron checkpoint
+
+                    len(fp32_from_fp16_params): 2, type(fp32_from_fp16_params): list
+
+                    fp32_from_fp16_params is organized in two param_groups:
+                    - fp32_from_fp16_params[0] is for params with wd, with length = 122
+                    - fp32_from_fp16_params[1] is for params without wd, with length = 242
+
+                    """
+                    checkpoint['optimizer']['fp32_from_fp16_params'][group_idx] = ckpt_fp32_subset
+                    ckpt_param_groups[group_idx]["params"] = list(range(param_index_begin, param_index_begin + len(ckpt_fp32_subset)))
+                    param_index_begin += len(ckpt_fp32_subset)
+
+                """
+                select state subset from the Megatron checkpoint.
+
+                the Megatron checkpoint 'state' is organized in the following way:
+
+                len(state) = 364
+
+                - key = 0,   val = state of group 0 param 0
+                - key = 1,   val = state of group 0 param 1
+                - key = 2,   val = state of group 0 param 2
+                ...
+                - key = 121, val = state of group 0 param 121
+                - key = 122, val = state of group 1 param 0
+                - key = 123, val = state of group 1 param 1
+                ...
+                - key = 363, val = state of group 1 param 241
+
+                """
+                state_idx = 0
+                for index, param_size in enumerate(cross_group_param_size_list):
+                    start_idx = state_idx
+                    end_idx = state_idx + param_size
+                    if index % args.num_stages == pp_rank:
+                        for key in range(start_idx, end_idx):
+                            ckpt_states_subset[len(ckpt_states_subset)] = ckpt_states[key]
+                    state_idx = end_idx
+
+            checkpoint['optimizer']['fp32_groups'] = checkpoint['optimizer']['fp32_from_fp16_params']
             checkpoint['optimizer']['optimizer']['state'] = ckpt_states_subset
             checkpoint['optimizer']['optimizer_state_dict'] = checkpoint['optimizer']['optimizer']
 
