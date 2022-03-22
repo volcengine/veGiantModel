@@ -276,8 +276,6 @@ def pretrain(model_provider, args_defaults={}):
     elif args.load is not None:
         engine.load_checkpoint(args.load)
     args.iteration = engine.global_steps
-
-    
     train(engine, optimizer, lr_scheduler)
 
 def traing_log(loss_dict, iteration):
