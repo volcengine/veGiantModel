@@ -343,6 +343,9 @@ def train(engine, optimizer, lr_scheduler):
     while iteration < args.train_iters:
         engine.train_batch(train_data_iterator)
         iteration += 1
+        if args.save and args.save_interval and \
+            iteration % args.save_interval == 0:
+            engine.save_checkpoint(args.save)
         
 if __name__ == "__main__":
     pretrain(model_provider,
