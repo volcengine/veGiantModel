@@ -104,7 +104,8 @@ def load_megatron_model_state(module, num_layers, checkpoint, load_optimizer, lo
             else:
                 assert False, name
 
-    new_loaded_dict['tied_modules.SharedEmbedding.word_embeddings.weight'] = new_loaded_dict['tied_modules.SharedEmbedding.embedding_weight']
+    if 'tied_modules.SharedEmbedding.embedding_weight' in new_loaded_dict:
+        new_loaded_dict['tied_modules.SharedEmbedding.word_embeddings.weight'] = new_loaded_dict['tied_modules.SharedEmbedding.embedding_weight']
     module.load_state_dict(new_loaded_dict, load_module_strict)
 
     return wd_param_indices, no_wd_param_indices
