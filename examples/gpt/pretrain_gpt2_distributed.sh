@@ -47,7 +47,6 @@ ds_config='{
 }'
 
 python3 -m torch.distributed.launch $DISTRIBUTED_ARGS \
-       --no_python --use_env python3 \
        ${base_dir}/pretrain_gpt2.py \
        --model-parallel-size 2 \
        --num-stages 2 \
