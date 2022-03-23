@@ -49,10 +49,8 @@ def launch_scheduler(local_rank):
         nvidia_smi = f'nvidia-smi -L'
         devices = os.popen(nvidia_smi).read().strip()
         if 'A100' in devices:
-            ip_cmd = f'ip addr show eth2'
-            ip = os.popen(ip_cmd + ' | grep "\<inet\>" | awk \'{ print $2 }\' | awk -F "/" \'{ print $1 }\'').read().strip()
-            my_env['DMLC_NODE_HOST'] = ip
-            my_env['UCX_RDMA_CM_SOURCE_ADDRESS'] = ip
+            my_env['DMLC_NODE_HOST'] = get_worker0_host()
+            my_env['UCX_RDMA_CM_SOURCE_ADDRESS'] = get_worker0_host()
             os.environ['UCX_NET_DEVICES'] = 'mlx5_2:1,eth0,eth1,eth2,eth3'
 
         command = "python3 -c 'import byteps.server'"
@@ -98,7 +96,11 @@ def setup_env(local_rank):
     nvidia_smi = f'nvidia-smi -L'
     devices = os.popen(nvidia_smi).read().strip()
     if 'A100' in devices:
-        nic = 2 # TODO: use multiple NICs with `int(local_rank / 2)`
+        # nvidia-smi topo -m | grep mlx | grep PIX | wc -l
+        # nvidia-smi topo -m | grep mlx | grep PXB | wc -l
+
+        # nic = 2 # TODO: use multiple NICs with `int(local_rank / 2)`
+        nic = int(local_rank / 4) + 1
         ip_cmd = f'ip addr show eth{nic}'
         ip = os.popen(ip_cmd + ' | grep "\<inet\>" | awk \'{ print $2 }\' | awk -F "/" \'{ print $1 }\'').read().strip()
         os.environ['UCX_RDMA_CM_SOURCE_ADDRESS'] = os.environ.get('UCX_RDMA_CM_SOURCE_ADDRESS', ip)
