@@ -268,6 +268,9 @@ def pretrain(model_provider, args_defaults={}):
     # Print setup timing.
     print_rank_0('done with setups ...')
     print_rank_0('training ...')
+
+    #current only suppport load megatron checkpoint when mp size are matched 
+    # and pipeline number larger than 2
     if args.load_megatron is not None:
         engine.load_megatron_checkpoint(args.load_megatron,
                                         optimizer=optimizer,

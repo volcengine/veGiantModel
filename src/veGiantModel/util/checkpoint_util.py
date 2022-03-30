@@ -104,6 +104,8 @@ def load_megatron_model_state(module, num_layers, checkpoint, load_optimizer, lo
             else:
                 assert False, name
 
+    #current only suppport load megatron checkpoint when mp size are matched 
+    # and pipeline number larger than 2
     if 'tied_modules.SharedEmbedding.embedding_weight' in new_loaded_dict:
         new_loaded_dict['tied_modules.SharedEmbedding.word_embeddings.weight'] = new_loaded_dict['tied_modules.SharedEmbedding.embedding_weight']
     module.load_state_dict(new_loaded_dict, load_module_strict)

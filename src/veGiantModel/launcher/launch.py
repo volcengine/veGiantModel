@@ -41,7 +41,6 @@ def launch_scheduler(local_rank):
     if local_rank != 0:
         return
 
-
     def scheduler_runner():
         my_env = os.environ.copy()
         my_env['DMLC_ROLE'] = 'scheduler'
@@ -51,7 +50,10 @@ def launch_scheduler(local_rank):
         if 'A100' in devices:
             my_env['DMLC_NODE_HOST'] = get_worker0_host()
             my_env['UCX_RDMA_CM_SOURCE_ADDRESS'] = get_worker0_host()
+            my_env['DMLC_INTERFACE'] = os.environ.get('VE_GIANT_MODEL_SCHED_INTERFACE', 'eth1')
+            dmlc_interface = my_env['DMLC_INTERFACE']
             os.environ['UCX_NET_DEVICES'] = 'mlx5_2:1,eth0,eth1,eth2,eth3'
+            log_dist(f'scheduler DMLC_NODE_HOST: {get_worker0_host()}, DMLC_INTERFACE:{dmlc_interface}', ranks=[-1])
 
         command = "python3 -c 'import byteps.server'"
         subprocess.check_call(command, env=my_env,
@@ -67,6 +69,30 @@ def get_worker0_host():
 def get_worker0_port():
     port = os.environ['WORKER_0_PORT']
     return port
+
+def get_nic(local_rank):
+
+    nic_cmd1 = 'nvidia-smi topo -m | grep mlx | grep PIX | wc -l'
+    nic_cmd2 = 'nvidia-smi topo -m | grep mlx | grep PXB | wc -l'
+    nic_count1 = int(os.popen(nic_cmd1).read().strip())
+    nic_count2 = int(os.popen(nic_cmd2).read().strip())
+
+    nic_count = max(nic_count1, nic_count2)
+    log_dist(f'get_nic:nic_count={nic_count}, nic_count1:{nic_count1}, nic_count2:{nic_count2}', ranks=[-1])
+
+    dmlc_nic_offset = int(os.environ.get('VE_GIANT_MODEL_NIC_OFFSET', 1))
+    if nic_count == 0:
+        nic_get = 1
+    elif nic_count == 2:
+        nic_get = int(local_rank / 4) + dmlc_nic_offset
+    elif nic_count == 4:
+        nic_get = int(local_rank / 2) + dmlc_nic_offset
+    else:
+        nic_get = 1
+    nic = os.environ.get('VE_GIANT_MODEL_NIC_BIND', nic_get)
+    os.environ['DMLC_INTERFACE'] = f'eth{nic}'
+    log_dist(f'DMLC_INTERFACE: eth{nic}', ranks=[-1])
+    return nic
 
 def setup_env(local_rank):
     mp_size = mpu.get_model_parallel_world_size()
@@ -88,19 +114,14 @@ def setup_env(local_rank):
     os.environ['DMLC_PS_ROOT_PORT'] = get_worker0_port()
     os.environ['DMLC_PS_ROOT_URI'] = get_worker0_host()
 
-    if 'DMLC_ENABLE_RDMA' not in os.environ:
-        os.environ['DMLC_ENABLE_RDMA'] = '1'
+    os.environ['DMLC_ENABLE_RDMA'] = os.environ.get('DMLC_ENABLE_RDMA', '1')
     os.environ['DMLC_ENABLE_UCX'] = os.environ.get('DMLC_ENABLE_UCX', '1')
     os.environ['UCX_IB_TRAFFIC_CLASS'] = '236'
     os.environ['UCX_TLS'] = os.environ.get('UCX_TLS', 'rc_x,tcp,sm')
     nvidia_smi = f'nvidia-smi -L'
     devices = os.popen(nvidia_smi).read().strip()
     if 'A100' in devices:
-        # nvidia-smi topo -m | grep mlx | grep PIX | wc -l
-        # nvidia-smi topo -m | grep mlx | grep PXB | wc -l
-
-        # nic = 2 # TODO: use multiple NICs with `int(local_rank / 2)`
-        nic = int(local_rank / 4) + 1
+        nic = get_nic(local_rank)
         ip_cmd = f'ip addr show eth{nic}'
         ip = os.popen(ip_cmd + ' | grep "\<inet\>" | awk \'{ print $2 }\' | awk -F "/" \'{ print $1 }\'').read().strip()
         os.environ['UCX_RDMA_CM_SOURCE_ADDRESS'] = os.environ.get('UCX_RDMA_CM_SOURCE_ADDRESS', ip)
