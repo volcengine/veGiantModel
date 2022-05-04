@@ -22,9 +22,11 @@ import torch.autograd as autograd
 # except ImportError:
 #     byteGiantModel = None
 
+
 class MockModule(nn.Module):
     """Module for testing model parallelism"""
     pass
+
 
 try:
     from th_fastertransformer import Linear
@@ -35,7 +37,7 @@ try:
         def forward(ctx, input_tensor, weight, bias, act_gelu=False, dropout_rate=0.0):
             bias_out = torch.Tensor(0)
             dropout_mask = torch.Tensor(0)
-            if act_gelu == True or dropout_rate > 0.0:
+            if act_gelu is True or dropout_rate > 0.0:
                 output, bias_out, dropout_mask = Linear.forward_gelu_dropout(input_tensor, weight, bias, act_gelu, dropout_rate)
             else:
                 output = Linear.forward(input_tensor, weight, bias)
@@ -49,7 +51,7 @@ try:
             act_gelu = ctx.act_gelu
             dropout_rate = ctx.dropout_rate
             input_tensor, weight, bias_out, dropout_mask = ctx.saved_tensors
-            if act_gelu == True or dropout_rate > 0.0:
+            if act_gelu is True or dropout_rate > 0.0:
                 grad_in, grad_weight, grad_bias = Linear.backward_gelu_dropout(
                     grad_out, input_tensor, weight, act_gelu, dropout_rate, bias_out, dropout_mask)
             else:
@@ -77,7 +79,7 @@ try:
         def extra_repr(self):
             return 'in_features={}, out_features={}'.format(self.in_features, self.out_features)
 
-except Exception as e:
+except Exception:
     FTLinear = None
 
 try:
@@ -118,9 +120,10 @@ try:
         def extra_repr(self):
             return 'in_features={}, out_features={}, head_num={}'.format(self.in_features, self.out_features, self.head_num)
 
-except Exception as e:
+except Exception:
     FTLinearTranspose = None
     FTDAGather = None
+
 
 def column_parallel_load_hook(module, log_fn):
     """hook for column parallel linear's load_state_dict function.
@@ -140,6 +143,7 @@ def column_parallel_load_hook(module, log_fn):
     """
     assert module.mp_rank is not None
     assert module.out_features is not None
+
     def hook(state_dict, prefix, local_metadata, strict, missing_keys,
              unexpected_keys, error_msgs):
         weight_name = prefix + 'weight'
@@ -162,6 +166,7 @@ def column_parallel_load_hook(module, log_fn):
             log_fn(f"slice param {bias_name}\tfor model parallelism: {v.shape} -> {shard.shape}")
     return hook
 
+
 def column_serial_load_hook(module, log_fn):
     """hook for column serial linear's load_state_dict function.
     It is a helper function to load a the checkpoint from a
@@ -180,6 +185,7 @@ def column_serial_load_hook(module, log_fn):
     """
     assert module.model_parallel_size is not None
     assert module.out_features is not None
+
     def hook(state_dict, prefix, local_metadata, strict, missing_keys,
              unexpected_keys, error_msgs):
         weight_name = prefix + 'weight'
@@ -207,6 +213,7 @@ def column_serial_load_hook(module, log_fn):
                 log_fn(f"slice param {bias_name_i}\tfor model parallelism: {v.shape} -> {shard.shape}")
             del state_dict[bias_name]
     return hook
+
 
 class ColumnSerialLinear(MockModule):
     def __init__(self, in_features, out_features, initializer_range=0.02,
@@ -254,6 +261,7 @@ class ColumnSerialLinear(MockModule):
 
     def extra_repr(self):
         return 'in_features={}, out_features={}'.format(self.in_features, self.out_features)
+
 
 class ColumnParallelLinear(nn.Module):
     def __init__(self, in_features, out_features, initializer_range=0.02,
@@ -311,7 +319,7 @@ class ColumnParallelLinear(nn.Module):
         input_tensor = veGiantModel.distributed.copy_to_model_parallel_region(input_tensor)
         if self.use_ft:
             output = LinearFunction.apply(input_tensor, self.weight, self.bias, self.act_gelu,
-                                            self.dropout_rate if self.training else 0.)
+                                          self.dropout_rate if self.training else 0.)
         else:
             output = nn.functional.linear(input_tensor, self.weight, self.bias)
         if self.gather_output:
@@ -320,6 +328,7 @@ class ColumnParallelLinear(nn.Module):
 
     def extra_repr(self):
         return 'in_features={}, out_features={}'.format(self.in_features, self.out_features)
+
 
 class RowSerialLinear(MockModule):
     def __init__(self, in_features, out_features, initializer_range=0.02, dropout_rate=0.0,
@@ -381,6 +390,7 @@ class RowSerialLinear(MockModule):
     def extra_repr(self):
         return 'in_features={}, out_features={}'.format(self.in_features, self.out_features)
 
+
 class RowParallelLinear(nn.Module):
     def __init__(self, in_features, out_features, initializer_range=0.02, dropout_rate=0.0,
                  load_from_shards=False, use_ft=False):
@@ -423,7 +433,7 @@ class RowParallelLinear(nn.Module):
         self.mp_rank = veGiantModel.distributed.get_model_parallel_rank()
         if not load_from_shards:
             def load_hook(state_dict, prefix, local_metadata, strict, missing_keys,
-                            unexpected_keys, error_msgs):
+                          unexpected_keys, error_msgs):
                 weight_name = prefix + 'weight'
                 if weight_name in state_dict:
                     v = state_dict[weight_name]
@@ -499,7 +509,7 @@ class ColumnParallelLinearTranspose(nn.Module):
         input_tensor = veGiantModel.distributed.copy_to_model_parallel_region(input_tensor)
         if self.use_ft:
             output = LinearTransposeFunction.apply(input_tensor, self.weight, self.bias,
-                                                    self.head_num, self.transpose_type)
+                                                   self.head_num, self.transpose_type)
         else:
             assert self.transpose_type == "0213", self.transpose_type
             linear_out = nn.functional.linear(input_tensor, self.weight, self.bias)
@@ -511,9 +521,10 @@ class ColumnParallelLinearTranspose(nn.Module):
     def extra_repr(self):
         return 'in_features={}, out_features={}, head_num={}'.format(self.in_features, self.out_features, self.head_num)
 
+
 class ColumnSerialLinearTranspose(MockModule):
     def __init__(self, in_features, out_features, head_num, transpose_type="0213", initializer_range=0.02,
-                    use_ft=False, load_from_shards=False):
+                 use_ft=False, load_from_shards=False):
         """
         A serial module that mocks the ColumnParallelLinearTranspose module. It mocks the parallel
         logic by applying the series of work on the same rank.

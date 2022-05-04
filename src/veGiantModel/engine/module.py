@@ -1,26 +1,25 @@
 # Copyright (c) 2021, ByteDance Inc.  All rights reserved.
 import os
-
 import re as regex
-
 from functools import partial
-
-import torch
-import torch.nn as nn
-import torch.distributed as dist
-
 from math import floor
 
-from deepspeed.utils import logger
+import torch
+import torch.distributed as dist
+import torch.nn as nn
+from deepspeed.pipe import LayerSpec, PipelineModule, TiedLayerSpec
 from deepspeed.runtime import utils as ds_utils
 from deepspeed.runtime.activation_checkpointing import checkpointing
-from deepspeed.pipe import PipelineModule,LayerSpec, TiedLayerSpec
+from deepspeed.utils import logger
+
 from .topology import PipeDataParallelTopology, PipelineParallelGrid
 
-class VeGiantModule(PipelineModule):
+
+class veGiantModule(PipelineModule):
     def __init__(self,
                  layers,
                  num_stages=None,
+                 topology=None,
                  loss_fn=None,
                  seed_layers=False,
                  seed_fn=None,
@@ -50,17 +49,20 @@ class VeGiantModule(PipelineModule):
         Args:
             layers (Iterable): A sequence of layers defining pipeline structure. Can be a ``torch.nn.Sequential`` module.
             num_stages (int, optional): The degree of pipeline parallelism. If not specified, ``topology`` must be provided.
-            topology (``deepseed.pipe.ProcessTopology``, optional): Defines the axes of parallelism axes for training. Must be provided if ``num_stages`` is ``None``.
+            topology (``deepseed.pipe.ProcessTopology``, optional): Defines the axes of parallelism axes for training.
+                Must be provided if ``num_stages`` is ``None``.
             loss_fn (callable, optional): Loss is computed ``loss = loss_fn(outputs, label)``
             base_seed (int, optional): [description]. Defaults to 1234.
             partition_method (str, optional): [description]. Defaults to 'parameters'.
-            activation_checkpoint_interval (int, optional): The granularity activation checkpointing in terms of number of layers. 0 disables activation checkpointing.
-            activation_checkpoint_func (callable, optional): The function to use for activation checkpointing. Defaults to ``deepspeed.checkpointing.checkpoint``.
+            activation_checkpoint_interval (int, optional): The granularity activation checkpointing in terms of number of layers.
+                0 disables activation checkpointing.
+            activation_checkpoint_func (callable, optional): The function to use for activation checkpointing.
+                Defaults to ``deepspeed.checkpointing.checkpoint``.
         """
 
         super(PipelineModule, self).__init__()
 
-        topology = grid.topology() if grid is not None else None
+        # topology = grid.topology() if grid is not None else None
 
         if num_stages is None and topology is None:
             raise RuntimeError('must provide num_stages or topology')
@@ -117,10 +119,10 @@ class VeGiantModule(PipelineModule):
         self.tied_weight_attrs = {}
 
         # Offset the random seed by the stage ID.
-        #newseed = torch.cuda.initial_seed() + self._grid.get_stage_id()
-        #ds_utils.set_random_seed(newseed)
+        # newseed = torch.cuda.initial_seed() + self._grid.get_stage_id()
+        # ds_utils.set_random_seed(newseed)
 
-        #with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
+        # with torch.random.fork_rng(devices=[torch.cuda.current_device()]):
         self._build()
         self.to('cuda')
 
@@ -195,8 +197,8 @@ class VeGiantModule(PipelineModule):
         param_counts = [0] * len(self._layer_specs)
         for idx, layer in enumerate(self._layer_specs):
             if isinstance(layer, LayerSpec):
-                l = layer.build()
-                params = filter(lambda p: p.requires_grad, l.parameters())
+                layer_spec = layer.build()
+                params = filter(lambda p: p.requires_grad, layer_spec.parameters())
                 param_counts[idx] = sum(p.numel() for p in params)
             elif isinstance(layer, nn.Module):
                 params = filter(lambda p: p.requires_grad, layer.parameters())
@@ -324,11 +326,11 @@ class VeGiantModule(PipelineModule):
         if method == 'uniform':
             num_layers = len(self._layer_specs)
             self.parts = self._partition_uniform(num_items=num_layers,
-                                            num_parts=num_stages)
+                                                 num_parts=num_stages)
         elif method == 'parameters':
             param_counts = self._count_layer_params()
             self.parts = self._partition_balanced(weights=param_counts,
-                                                     num_parts=num_stages)
+                                                  num_parts=num_stages)
         elif method.startswith('type:'):
             layertype = method.split(':')[1]
             binary_weights = [0] * len(self._layer_specs)
@@ -336,13 +338,13 @@ class VeGiantModule(PipelineModule):
                 binary_weights[idx] = 1
             else:
                 self.parts = self._partition_balanced(weights=binary_weights,
-                                                         num_parts=num_stages)
+                                                      num_parts=num_stages)
         elif method.startswith('manual:'):
             msplit = method.split(':')
             layernum = int(msplit[1])
             layerparts = msplit[2].split(',')
-            assert len(self._layer_specs) == layernum # failsafe check for layer num
-            assert num_stages == len(layerparts)-1 # failsafe check for num stages
+            assert len(self._layer_specs) == layernum  # failsafe check for layer num
+            assert num_stages == len(layerparts) - 1  # failsafe check for num stages
             self.parts = list(map(int, layerparts))
         elif method == 'profile':
             raise NotImplementedError(f'Partitioning method {method} not implemented.')
@@ -501,7 +503,7 @@ class VeGiantModule(PipelineModule):
         idx = local_layer_idx + self._local_start
         layer_ckpt_path = os.path.join(ckpt_dir, f'layer_{idx:02d}')
         rank_repr = self._grid._topo.get_rank_repr(rank=self.global_rank)
-        if rank_repr is not '':
+        if rank_repr != '':
             layer_ckpt_path += f'-{rank_repr}'
         layer_ckpt_path += '-model_states.pt'
         return layer_ckpt_path
@@ -511,7 +513,7 @@ class VeGiantModule(PipelineModule):
             return
 
         os.makedirs(save_dir, exist_ok=True)
-        layer_offset = self._local_start
+        # layer_offset = self._local_start
         for idx, layer in enumerate(self.forward_funcs):
             model_ckpt_path = self.ckpt_layer_path(save_dir, idx)
             if not hasattr(layer, 'state_dict'):
@@ -519,7 +521,7 @@ class VeGiantModule(PipelineModule):
             torch.save(layer.state_dict(), model_ckpt_path)
 
     def load_state_dir(self, load_dir, strict=True):
-        rank = dist.get_rank()
+        # rank = dist.get_rank()
 
         layer_offset = self._local_start
         for idx, layer in enumerate(self.forward_funcs):

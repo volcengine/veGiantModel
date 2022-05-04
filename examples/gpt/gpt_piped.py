@@ -1,22 +1,17 @@
 import torch
-
-from megatron import get_args, mpu
-
-from megatron.model.language_model import parallel_lm_logits, Embedding
-from megatron.model.transformer import ParallelTransformerLayer
-from megatron.model.transformer import LayerNorm
-from megatron.model.gpt2_model import gpt2_attention_mask_func
-from megatron.model.utils import init_method_normal
-from megatron.model.utils import scaled_init_method_normal
-from megatron.module import MegatronModule
-from megatron.utils import get_ltor_masks_and_position_ids
-
-from deepspeed.pipe import LayerSpec, TiedLayerSpec
-from megatron import get_tokenizer
-from veGiantModel.engine.module import VeGiantModule
 import veGiantModel
+from deepspeed.pipe import LayerSpec, TiedLayerSpec
+from megatron import get_args, get_tokenizer, mpu
+from megatron.model.gpt_model import gpt2_attention_mask_func
+from megatron.model.language_model import Embedding, parallel_lm_logits
+from megatron.model.transformer import LayerNorm, ParallelTransformerLayer
+from megatron.model.utils import init_method_normal, scaled_init_method_normal
+from megatron.model.module import MegatronModule
+from megatron.utils import get_ltor_masks_and_position_ids
+from veGiantModel.engine.module import veGiantModule
 
-class GPTModelPiped(VeGiantModule):
+
+class GPTModelPiped(veGiantModule):
     def __init__(self):
         args = get_args()
         self.fp16_lm_cross_entropy = args.fp16_lm_cross_entropy
