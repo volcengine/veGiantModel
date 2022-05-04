@@ -21,11 +21,19 @@ import torch.nn.functional as F
 from veGiantModel.megatron import get_args
 from veGiantModel.megatron import mpu
 from .module import MegatronModule
-from .enums import AttnMaskType, ModelType, LayerType, AttnType
-from . import LayerNorm
-from .fused_softmax import FusedScaleMaskSoftmax
-from .fused_bias_gelu import bias_gelu_impl
-from .utils import attention_mask_func, openai_gelu, erf_gelu
+from veGiantModel.megatron.model.enums import AttnMaskType, LayerType, AttnType
+from veGiantModel.megatron.model import LayerNorm
+from veGiantModel.megatron.model.fused_softmax import FusedScaleMaskSoftmax
+from veGiantModel.megatron.model.fused_bias_gelu import bias_gelu_impl
+from veGiantModel.megatron.model.utils import attention_mask_func, openai_gelu, erf_gelu
+
+import deepspeed
+
+# flags required to enable jit fusion kernels
+torch._C._jit_set_profiling_mode(False)
+torch._C._jit_set_profiling_executor(False)
+torch._C._jit_override_can_fuse_on_cpu(True)
+torch._C._jit_override_can_fuse_on_gpu(True)
 
 """ We use the following notation throughout this file:
      h: hidden size
@@ -47,7 +55,8 @@ class ParallelMLP(MegatronModule):
 
     MLP will take the input with h hidden state, project it to 4*h
     hidden dimension, perform nonlinear transformation, and project the
-    state back into h hidden dimension.
+    state back into h hidden dimension. At the end, dropout is also
+    applied.
     """
 
     def __init__(self, init_method, output_layer_init_method):
@@ -76,6 +85,7 @@ class ParallelMLP(MegatronModule):
             input_is_parallel=True,
             init_method=output_layer_init_method,
             skip_bias_add=True)
+
 
     def forward(self, hidden_states):
 
@@ -117,7 +127,6 @@ class ParallelAttention(MegatronModule):
         self.layer_number = max(1, layer_number)
         self.attention_type = attention_type
         self.attn_mask_type = attn_mask_type
-        self.params_dtype = args.params_dtype
 
         projection_size = args.kv_channels * args.num_attention_heads
 
@@ -178,39 +187,14 @@ class ParallelAttention(MegatronModule):
             init_method=output_layer_init_method,
             skip_bias_add=True)
 
+        if deepspeed.checkpointing.is_configured():
+            global get_cuda_rng_tracker, checkpoint
+            get_cuda_rng_tracker = deepspeed.checkpointing.get_cuda_rng_tracker
+            checkpoint = deepspeed.checkpointing.checkpoint
 
-    def _allocate_memory(self, inference_max_sequence_len, batch_size):
-        return torch.empty(
-            inference_max_sequence_len,
-            batch_size,
-            self.num_attention_heads_per_partition,
-            self.hidden_size_per_attention_head,
-            dtype=self.params_dtype,
-            device=torch.cuda.current_device())
-        
-
-    def forward(self, hidden_states, attention_mask,
-                encoder_output=None, inference_params=None):
+    def forward(self, hidden_states, attention_mask, layer_past=None,
+                get_key_value=False, encoder_output=None):
         # hidden_states: [sq, b, h]
-
-
-        # =================================================
-        # Pre-allocate memory for key-values for inference.
-        # =================================================
-        if inference_params:
-            if self.layer_number not in inference_params.key_value_memory_dict:
-                inf_max_seq_len = inference_params.max_sequence_len
-                inf_max_batch_size = inference_params.max_batch_size
-                inference_key_memory = self._allocate_memory(
-                    inf_max_seq_len, inf_max_batch_size)
-                inference_value_memory = self._allocate_memory(
-                    inf_max_seq_len, inf_max_batch_size)
-                inference_params.key_value_memory_dict[self.layer_number] = (
-                    inference_key_memory, inference_value_memory)
-            else:
-                inference_key_memory, inference_value_memory = \
-                    inference_params.key_value_memory_dict[self.layer_number]
-
 
         # =====================
         # Query, Key, and Value
@@ -252,28 +236,18 @@ class ParallelAttention(MegatronModule):
                  self.hidden_size_per_attention_head)
             query_layer = query_layer.view(*new_tensor_shape)
 
-
         # ==================================
         # Adjust key and value for inference
         # ==================================
 
-        if inference_params:
-            batch_start = inference_params.batch_size_offset
-            batch_end = batch_start + key_layer.size(1)
-            assert batch_end <= inference_key_memory.size(1)
-            sequence_start = inference_params.sequence_len_offset
-            sequence_end = sequence_start + key_layer.size(0)
-            assert sequence_end <= inference_key_memory.size(0)
-            # Copy key and values.
-            inference_key_memory[sequence_start:sequence_end,
-                                 batch_start:batch_end, ...] = key_layer
-            inference_value_memory[sequence_start:sequence_end,
-                                   batch_start:batch_end, ...] = value_layer
-            key_layer = inference_key_memory[
-                :sequence_end, batch_start:batch_end, ...]
-            value_layer = inference_value_memory[
-                :sequence_end, batch_start:batch_end, ...]
-
+        if layer_past is not None:
+            past_key, past_value = layer_past
+            key_layer = torch.cat((past_key.type_as(key_layer),
+                                   key_layer), dim=0)
+            value_layer = torch.cat((past_value.type_as(value_layer),
+                                     value_layer), dim=0)
+        if get_key_value:
+            present = (key_layer, value_layer)
 
         # ===================================
         # Raw attention scores. [b, np, s, s]
@@ -310,6 +284,22 @@ class ParallelAttention(MegatronModule):
         # change view to [b, np, sq, sk]
         attention_scores = matmul_result.view(*output_size)
 
+        # ==================================================
+        # Update attention mask for inference. [b, np, sq, sk]
+        # ==================================================
+
+        if get_key_value:
+            with torch.no_grad():
+                if layer_past is not None:
+                    attention_mask = attention_mask[
+                        ...,
+                        attention_scores.size(3) - 1,
+                        :attention_scores.size(3)].unsqueeze(2)
+                else:
+                    attention_mask = attention_mask[
+                        ...,
+                        :attention_scores.size(3),
+                        :attention_scores.size(3)]
 
         # ===========================
         # Attention probs and dropout
@@ -365,6 +355,9 @@ class ParallelAttention(MegatronModule):
 
         output, bias = self.dense(context_layer)
 
+        if get_key_value:
+            output = [output, present]
+
         return output, bias
 
 
@@ -382,18 +375,14 @@ def get_bias_dropout_add(training):
 
 
 @torch.jit.script
-def bias_dropout_add_fused_train(x: torch.Tensor,
-                                 bias: torch.Tensor,
-                                 residual: torch.Tensor,
-                                 prob: float) -> torch.Tensor:
+def bias_dropout_add_fused_train(x, bias, residual, prob):
+    # type: (Tensor, Tensor, Tensor, float) -> Tensor
     return bias_dropout_add(x, bias, residual, prob, True)
 
 
 @torch.jit.script
-def bias_dropout_add_fused_inference(x: torch.Tensor,
-                                     bias: torch.Tensor,
-                                     residual: torch.Tensor,
-                                     prob: float) -> torch.Tensor:
+def bias_dropout_add_fused_inference(x, bias, residual, prob):
+    # type: (Tensor, Tensor, Tensor, float) -> Tensor
     return bias_dropout_add(x, bias, residual, prob, False)
 
 
@@ -422,8 +411,7 @@ class ParallelTransformerLayer(MegatronModule):
         # Layernorm on the input data.
         self.input_layernorm = LayerNorm(
             args.hidden_size,
-            eps=args.layernorm_epsilon,
-            no_persist_layer_norm=args.no_persist_layer_norm)
+            eps=args.layernorm_epsilon)
 
         # Self attention.
         self.self_attention = ParallelAttention(
@@ -438,8 +426,7 @@ class ParallelTransformerLayer(MegatronModule):
         # Layernorm on the attention output
         self.post_attention_layernorm = LayerNorm(
             args.hidden_size,
-            eps=args.layernorm_epsilon,
-            no_persist_layer_norm=args.no_persist_layer_norm)
+            eps=args.layernorm_epsilon)
 
         if self.layer_type == LayerType.decoder:
             self.inter_attention = ParallelAttention(
@@ -450,8 +437,7 @@ class ParallelTransformerLayer(MegatronModule):
             # Layernorm on the attention output.
             self.post_inter_attention_layernorm = LayerNorm(
                 args.hidden_size,
-                eps=args.layernorm_epsilon,
-                no_persist_layer_norm=args.no_persist_layer_norm)
+                eps=args.layernorm_epsilon)
 
         # MLP
         self.mlp = ParallelMLP(init_method,
@@ -459,17 +445,20 @@ class ParallelTransformerLayer(MegatronModule):
 
     def forward(self, hidden_states, attention_mask,
                 encoder_output=None, enc_dec_attn_mask=None,
-                inference_params=None):
+                layer_past=None, get_key_value=False):
         # hidden_states: [b, s, h]
 
         # Layer norm at the beginning of the transformer layer.
         layernorm_output = self.input_layernorm(hidden_states)
         # Self attention.
         attention_output, attention_bias = \
-            self.self_attention(
-                layernorm_output,
-                attention_mask,
-                inference_params=inference_params)
+            self.self_attention(layernorm_output,
+                                attention_mask,
+                                layer_past=layer_past,
+                                get_key_value=get_key_value)
+
+        if get_key_value:
+            attention_output, presents = attention_output
 
         # Residual connection.
         if self.apply_residual_connection_post_layernorm:
@@ -539,7 +528,45 @@ class ParallelTransformerLayer(MegatronModule):
                 residual,
                 self.hidden_dropout)
 
+        if get_key_value:
+            output = [output, presents]
+
         return output
+
+class ParallelTransformerLayerPipe(ParallelTransformerLayer):
+    """Extends ParallelTransformerLayer to forward attention_mask through the pipeline.
+
+    Forward has two usages that affect attention mask communication:
+
+    1) forward((input, attn_mask) , **kwargs) -> (output, mask)
+       When the attention mask is provided as the second positional
+       argument, typical pipeline behavior is used and both the output
+       *and* mask are returned in a tuple. This tuple is then forwarded
+       to the next stage in the pipeline.
+
+       This version is useful if masks are dynamic.
+    
+    2) forward(input, **kwargs) -> output
+       When the mask is static over all samples, it is advantageous to
+       cache the mask and avoid communicating it.
+
+       If no mask is provided, the module will query `self._args.attn_mask`
+       for the mask and only return `super().forward(...)`
+    """
+    def forward(self, inputs, **kwargs):
+        assert torch.is_tensor(inputs) or isinstance(inputs, tuple)
+        if torch.is_tensor(inputs) or len(inputs) == 1:
+            # No attention mask forwarded, search for args.attn_mask
+            if not hasattr(self, '_args'):
+                self._args = get_args()
+            hidden_states, attention_mask = inputs, self._args.attn_mask
+            return super().forward(hidden_states, attention_mask, **kwargs)
+        elif len(inputs) == 2:
+            # Attention mask is an activation.
+            hidden_states, attention_mask = inputs[0], inputs[1]
+            return super().forward(*inputs, **kwargs), attention_mask
+        else:
+            raise RuntimeError('Received more inputs than understood.')
 
 
 class ParallelTransformer(MegatronModule):
@@ -559,13 +586,13 @@ class ParallelTransformer(MegatronModule):
         self.input_tensor = None
 
         # Store activation checkpoiting flag.
-        self.activations_checkpoint_method = args.activations_checkpoint_method
-        self.activations_checkpoint_num_layers = args.activations_checkpoint_num_layers
-        self.distribute_checkpointed_activations = args.distribute_checkpointed_activations
+        self.checkpoint_activations = args.checkpoint_activations
+        self.checkpoint_num_layers = args.checkpoint_num_layers
 
         # Number of layers.
-        self.num_layers = mpu.get_num_layers(
-            args, args.model_type == ModelType.encoder_and_decoder)
+        assert args.num_layers % mpu.get_pipeline_model_parallel_world_size() == 0, \
+            'num_layers must be divisible by pipeline_model_parallel_size'
+        self.num_layers = args.num_layers // mpu.get_pipeline_model_parallel_world_size()
 
         # Transformer layers.
         def build_layer(layer_number):
@@ -579,7 +606,6 @@ class ParallelTransformer(MegatronModule):
             assert args.num_layers % args.virtual_pipeline_model_parallel_size == 0, \
                 'num_layers_per_stage must be divisible by ' \
                 'virtual_pipeline_model_parallel_size'
-            assert args.model_type != ModelType.encoder_and_decoder
             # Number of layers in each model chunk is the number of layers in the stage,
             # divided by the number of model chunks in a stage.
             self.num_layers = self.num_layers // args.virtual_pipeline_model_parallel_size
@@ -596,16 +622,7 @@ class ParallelTransformer(MegatronModule):
                 (mpu.get_pipeline_model_parallel_rank() * self.num_layers)
         else:
             # Each stage gets a contiguous set of layers.
-            if args.model_type == ModelType.encoder_and_decoder and \
-                    mpu.get_pipeline_model_parallel_world_size() > 1:
-                pipeline_rank = mpu.get_pipeline_model_parallel_rank()
-                if layer_type == LayerType.encoder:
-                    offset = pipeline_rank * self.num_layers
-                else:
-                    num_ranks_in_enc = args.pipeline_model_parallel_split_rank
-                    offset = (pipeline_rank - num_ranks_in_enc) * self.num_layers
-            else:
-                offset = mpu.get_pipeline_model_parallel_rank() * self.num_layers
+            offset = mpu.get_pipeline_model_parallel_rank() * self.num_layers
 
         self.layers = torch.nn.ModuleList(
             [build_layer(i + 1 + offset) for i in range(self.num_layers)])
@@ -614,8 +631,12 @@ class ParallelTransformer(MegatronModule):
             # Final layer norm before output.
             self.final_layernorm = LayerNorm(
                 args.hidden_size,
-                eps=args.layernorm_epsilon,
-                no_persist_layer_norm=args.no_persist_layer_norm)
+                eps=args.layernorm_epsilon)
+
+        if deepspeed.checkpointing.is_configured():
+            global get_cuda_rng_tracker, checkpoint
+            get_cuda_rng_tracker = deepspeed.checkpointing.get_cuda_rng_tracker
+            checkpoint = deepspeed.checkpointing.checkpoint
 
     def _get_layer(self, layer_number):
         return self.layers[layer_number]
@@ -635,32 +656,14 @@ class ParallelTransformer(MegatronModule):
                 return x_
             return custom_forward
 
-        if self.activations_checkpoint_method == 'uniform':
-            # Uniformly divide the total number of Transformer layers and checkpoint
-            # the input activation of each divided chunk.
-            # A method to further reduce memory usage reducing checkpoints.
-            l = 0
-            while l < self.num_layers:
-                hidden_states = mpu.checkpoint(
-                    custom(l, l + self.activations_checkpoint_num_layers),
-                    self.distribute_checkpointed_activations,
-                    hidden_states, attention_mask, encoder_output, enc_dec_attn_mask)
-                l += self.activations_checkpoint_num_layers
-        elif self.activations_checkpoint_method == 'block':
-            # Checkpoint the input activation of only a set number of individual
-            # Transformer layers and skip the rest.
-            # A method fully use the device memory removing redundant re-computation.
-            for l in range(self.num_layers):
-                if l < self.activations_checkpoint_num_layers:
-                    hidden_states = mpu.checkpoint(
-                        custom(l, l + 1),
-                        self.distribute_checkpointed_activations,
-                        hidden_states, attention_mask, encoder_output, enc_dec_attn_mask)
-                else:
-                    hidden_states = custom(l, l + 1)(
-                        hidden_states, attention_mask, encoder_output, enc_dec_attn_mask)
-        else:
-            raise ValueError("Invalid activation checkpoint method.")
+        # Make sure memory is freed.
+        mpu.reset_checkpointed_activations_memory_buffer()
+        l = 0
+        while l < self.num_layers:
+            hidden_states = mpu.checkpoint(
+                custom(l, l + self.checkpoint_num_layers),
+                hidden_states, attention_mask, encoder_output, enc_dec_attn_mask)
+            l += self.checkpoint_num_layers
 
         return hidden_states
 
@@ -674,14 +677,18 @@ class ParallelTransformer(MegatronModule):
         forward_step_func"""
         self.input_tensor = input_tensor
 
-    def forward(self, hidden_states, attention_mask,
-                encoder_output=None, enc_dec_attn_mask=None,
-                inference_params=None):
+    def forward(self, hidden_states, attention_mask, layer_past=None,
+                get_key_value=False, encoder_output=None, enc_dec_attn_mask=None):
 
         # Checks.
-        if inference_params:
-            assert self.activations_checkpoint_method is None, \
-                'inference does not work with activation checkpointing'
+        if layer_past is not None:
+            assert get_key_value, \
+                'for not None values in layer_past, ' \
+                'expected get_key_value to be set'
+        if get_key_value:
+            assert not self.checkpoint_activations, \
+                'get_key_value does not work with ' \
+                'activation checkpointing'
 
         if self.pre_process:
             # Data format change to avoid explicit tranposes : [b s h] --> [s b h].
@@ -695,47 +702,31 @@ class ParallelTransformer(MegatronModule):
             # See set_input_tensor()
             hidden_states = self.input_tensor
 
-        # Viewless tensor.
-        # - We only need to create a viewless tensor in the case of micro batch
-        #   size (mbs) == 1, since in this case, 'hidden_states.transpose()'
-        #   above creates a view tensor, and '.contiguous()' is a pass-through.
-        #   For mbs >= 2, '.contiguous()' creates a new tensor, eliminating
-        #   the need to make it viewless.
-        #
-        #   However, we don't explicitly check mbs == 1 here because
-        #   make_viewless_tensor() has negligible overhead when its input
-        #   is already viewless.
-        # 
-        # - For the 'else' case above, calling make_viewless_tensor() here is
-        #   likely redundant, since p2p_communication.py (likely originator)
-        #   already creates viewless tensors. That said, make_viewless_tensor()
-        #   is called here to be future-proof and corner-case-proof.
-        hidden_states = mpu.make_viewless_tensor(
-            hidden_states,
-            requires_grad = True,
-            keep_graph = True,
-        )
-
-        # Transpose encoder output.
         if encoder_output is not None:
-            encoder_output = encoder_output.transpose(0, 1).contiguous()
+             encoder_output = encoder_output.transpose(0, 1).contiguous()
 
-        # Forward pass.
-        if self.activations_checkpoint_method is not None:
+        if self.checkpoint_activations:
             hidden_states = self._checkpointed_forward(hidden_states,
                                                        attention_mask,
                                                        encoder_output,
                                                        enc_dec_attn_mask)
         else:
+            if get_key_value:
+                presents = []
             for index in range(self.num_layers):
                 layer = self._get_layer(index)
-                hidden_states = layer(
-                    hidden_states,
-                    attention_mask,
-                    encoder_output=encoder_output,
-                    enc_dec_attn_mask=enc_dec_attn_mask,
-                    inference_params=inference_params)
-
+                past = None
+                if layer_past is not None:
+                    past = layer_past[index]
+                hidden_states = layer(hidden_states,
+                                      attention_mask,
+                                      encoder_output=encoder_output,
+                                      enc_dec_attn_mask=enc_dec_attn_mask,
+                                      layer_past=past,
+                                      get_key_value=get_key_value)
+                if get_key_value:
+                    hidden_states, present = hidden_states
+                    presents.append(present)
 
         # Final layer norm.
         if self.post_process:
@@ -744,5 +735,7 @@ class ParallelTransformer(MegatronModule):
             output = self.final_layernorm(hidden_states)
         else:
             output = hidden_states
-        
+        if get_key_value:
+            output = [output, presents]
+
         return output

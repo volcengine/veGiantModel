@@ -19,6 +19,7 @@ import argparse
 import os
 
 import torch
+import deepspeed
 
 def parse_args(extra_args_provider=None, defaults={},
                ignore_unknown_args=False):
@@ -41,11 +42,15 @@ def parse_args(extra_args_provider=None, defaults={},
     parser = _add_biencoder_args(parser)
     parser = _add_vit_args(parser)
     parser = _add_logging_args(parser)
-    parser = _add_inference_args(parser)
+    parser = _add_zero_args(parser)
+    parser = _add_memoryopt_args(parser)
+    parser = _add_activation_checkpoint_args(parser)
 
     # Custom arguments.
     if extra_args_provider is not None:
         parser = extra_args_provider(parser)
+
+    parser = deepspeed.add_config_arguments(parser)
 
     # Parse.
     if ignore_unknown_args:
@@ -81,12 +86,6 @@ def parse_args(extra_args_provider=None, defaults={},
                   args.world_size, args.data_parallel_size,
                   args.tensor_model_parallel_size,
                   args.pipeline_model_parallel_size), flush=True)
-    if args.pipeline_model_parallel_size > 1:
-        if args.pipeline_model_parallel_split_rank is not None:
-            assert args.pipeline_model_parallel_split_rank < \
-                    args.pipeline_model_parallel_size, 'split rank needs'\
-                    ' to be less than pipeline model parallel size ({})'.format(
-                            args.pipeline_model_parallel_size)
 
     # Deprecated arguments
     assert args.batch_size is None, '--batch-size argument is no longer ' \
@@ -98,13 +97,6 @@ def parse_args(extra_args_provider=None, defaults={},
     assert args.model_parallel_size is None, '--model-parallel-size is no ' \
         'longer valid, use --tensor-model-parallel-size instead'
     del args.model_parallel_size
-    if args.checkpoint_activations:
-        args.activations_checkpoint_method = 'uniform'
-        if args.rank == 0:
-            print('--checkpoint-activations is no longer valid, '
-                  'use --activation-checkpoint-method instead. '
-                  'Defaulting to activation-checkpoint-method=uniform.')
-    del args.checkpoint_activations
 
     # Set input defaults.
     for key in defaults:
@@ -162,15 +154,11 @@ def parse_args(extra_args_provider=None, defaults={},
         print('using {} for parameters ...'.format(args.params_dtype),
               flush=True)
 
-    # If we do accumulation and all-reduces in fp32, we need to have local DDP
-    # and we should make sure use-contiguous-buffers-in-local-ddp is not off.
+    # If we do accumulation and all-reduces in fp32, we need to have
+    # local DDP and we should set the use-contiguous-buffers-in-ddp.
     if args.accumulate_allreduce_grads_in_fp32:
         assert args.DDP_impl == 'local'
-        assert args.use_contiguous_buffers_in_local_ddp
-
-    # For torch DDP, we do not use contiguous buffer
-    if args.DDP_impl == 'torch':
-        args.use_contiguous_buffers_in_local_ddp = False
+        args.use_contiguous_buffers_in_ddp = True
 
     if args.dataloader_type is None:
         args.dataloader_type = 'single'
@@ -178,6 +166,7 @@ def parse_args(extra_args_provider=None, defaults={},
     # Consumed tokens.
     args.consumed_train_samples = 0
     args.consumed_valid_samples = 0
+    args.consumed_train_tokens = 0
 
     # Iteration-based training.
     if args.train_iters:
@@ -245,29 +234,13 @@ def parse_args(extra_args_provider=None, defaults={},
     if args.fp32_residual_connection:
         assert args.fp16 or args.bf16, \
             'residual connection in fp32 only supported when using fp16 or bf16.'
-
-    TORCH_MAJOR = int(torch.__version__.split('.')[0])
-    TORCH_MINOR = int(torch.__version__.split('.')[1])
-    # Persistent fused layer norm.
-    if TORCH_MAJOR < 1 or (TORCH_MAJOR == 1 and TORCH_MINOR < 11):
-        args.no_persist_layer_norm = True
-        if args.rank == 0:
-            print('Persistent fused layer norm kernel is supported from '
-                  'pytorch v1.11 (nvidia pytorch container paired with v1.11). '
-                  'Defaulting to no_persist_layer_norm=True')
-
     # Activation checkpointing.
     if args.distribute_checkpointed_activations:
-        assert args.tensor_model_parallel_size > 1, 'can distribute ' \
-            'checkpointed activations only across tensor model ' \
-            'parallel groups'
-        assert args.activations_checkpoint_method is not None, \
-            'for distributed checkpoint activations to work you '\
-            'need to use a activation-checkpoint method '
-        assert TORCH_MAJOR >= 1 and TORCH_MINOR >= 10, \
-            'distributed checkpoint activations are supported for pytorch ' \
-            'v1.10 and above (Nvidia Pytorch container >= 21.07). Current ' \
-            'pytorch version is v%s.%s.' % (TORCH_MAJOR, TORCH_MINOR)
+        assert args.checkpoint_activations, \
+            'for distribute-checkpointed-activations to work you '\
+            'need to enable checkpoint-activations'
+
+    args.curriculum_learning = False
 
     _print_args(args)
     return args
@@ -292,18 +265,6 @@ def _check_arg_is_not_none(args, arg):
     assert getattr(args, arg) is not None, '{} argument is None'.format(arg)
 
 
-def _add_inference_args(parser):
-    group = parser.add_argument_group(title='inference')
-
-    group.add_argument('--inference-batch-times-seqlen-threshold',
-                       type=int, default=512,
-                       help='During inference, if batch-size times '
-                       'sequence-length is smaller than this threshold '
-                       'then we will not use pipelining, otherwise we will.')
-
-    return parser
-
-    
 def _add_network_size_args(parser):
     group = parser.add_argument_group(title='network size')
 
@@ -376,12 +337,6 @@ def _add_logging_args(parser):
                        action='store_true',
                        help='If set, write validation perplexity to '
                        'tensorboard.')
-    group.add_argument('--log-memory-to-tensorboard',
-                       action='store_true',
-                       help='Enable memory logging to tensorboard.')
-    group.add_argument('--log-world-size-to-tensorboard',
-                       action='store_true',
-                       help='Enable world size logging to tensorboard.')
 
     return parser
 
@@ -448,20 +403,8 @@ def _add_training_args(parser):
                        action='store_true',
                        help='If set, distribute checkpointed activations '
                        'across model parallel group.')
-    group.add_argument('--activations-checkpoint-method', type=str, default=None,
-                       choices=['uniform', 'block'],
-                       help='1) uniform: uniformly divide the total number of '
-                       'Transformer layers and checkpoint the input activation of '
-                       'each divided chunk, '
-                       '2) checkpoint the input activations of only a set number of '
-                       'individual Transformer layers per pipeline stage and do the '
-                       'rest without any checkpointing'
-                       'default) do not apply activations checkpoint to any layers')
-    group.add_argument('--activations-checkpoint-num-layers', type=int, default=1,
-                       help='1) uniform: the number of Transformer layers in each '
-                       'uniformly divided checkpoint unit, '
-                       '2) block: the number of individual Transformer layers '
-                       'to checkpoint within each pipeline stage.')
+    group.add_argument('--checkpoint-num-layers', type=int, default=1,
+                       help='chunk size (number of layers) for checkpointing.')
     group.add_argument('--train-iters', type=int, default=None,
                        help='Total number of iterations to train over all '
                        'training runs. Note that either train-iters or '
@@ -470,6 +413,9 @@ def _add_training_args(parser):
                        help='Total number of samples to train over all '
                        'training runs. Note that either train-iters or '
                        'train-samples should be provided.')
+    group.add_argument('--train-tokens', type=int, default=None,
+                       help='Total number of tokens to train over all '
+                       'training runs.')
     group.add_argument('--log-interval', type=int, default=100,
                        help='Report loss and timing interval.')
     group.add_argument('--exit-interval', type=int, default=None,
@@ -477,9 +423,6 @@ def _add_training_args(parser):
                        'by this value.')
     group.add_argument('--exit-duration-in-mins', type=int, default=None,
                        help='Exit the program after this many minutes.')
-    group.add_argument('--exit-signal-handler', action='store_true',
-                       help='Dynamically save the checkpoint and shutdown the '
-                       'training if SIGTERM is received')
     group.add_argument('--tensorboard-dir', type=str, default=None,
                        help='Write TensorBoard logs to this directory.')
     group.add_argument('--no-masked-softmax-fusion',
@@ -499,16 +442,11 @@ def _add_training_args(parser):
     group.add_argument('--dataloader-type', type=str, default=None,
                        choices=['single', 'cyclic'],
                        help='Single pass vs multiple pass data loader')
-    group.add_argument('--no-async-tensor-model-parallel-allreduce',
-                       action='store_true',
-                       help='Disable asynchronous execution of '
-                       'tensor-model-parallel all-reduce with weight '
-                       'gradient compuation of a column-linear layer.')
-    group.add_argument('--no-persist-layer-norm', action='store_true',
-                       help='Disable using persistent fused layer norm kernel. '
-                       'This kernel supports only a set of hidden sizes. Please '
-                       'check persist_ln_hidden_sizes if your hidden '
-                       'size is supported.')
+    group.add_argument('--cpu-optimizer', action='store_true',
+                       help='Run optimizer on CPU')
+    group.add_argument('--cpu_torch_adam', action='store_true',
+                       help='Use Torch Adam as optimizer on CPU.')
+
     return parser
 
 
@@ -518,9 +456,6 @@ def _add_initialization_args(parser):
     group.add_argument('--seed', type=int, default=1234,
                        help='Random seed used for python, numpy, '
                        'pytorch, and cuda.')
-    group.add_argument('--data-parallel-random-init', action='store_true',
-                       help='Enable random initialization of params '
-                       'across data parallel ranks')
     group.add_argument('--init-method-std', type=float, default=0.02,
                        help='Standard deviation of the zero mean normal '
                        'distribution used for weight initialization.')
@@ -546,6 +481,9 @@ def _add_learning_rate_args(parser):
     group.add_argument('--lr-decay-samples', type=int, default=None,
                        help='number of samples to decay learning rate over,'
                        ' If None defaults to `--train-samples`')
+    group.add_argument('--lr-decay-tokens', type=int, default=None,
+                       help='number of tokens to decay learning rate over,'
+                       ' If not None will override iter/sample-based decay')
     group.add_argument('--lr-warmup-fraction', type=float, default=None,
                        help='fraction of lr-warmup-(iters/samples) to use '
                        'for warmup (as a float)')
@@ -646,9 +584,6 @@ def _add_distributed_args(parser):
                        help='Degree of tensor model parallelism.')
     group.add_argument('--pipeline-model-parallel-size', type=int, default=1,
                        help='Degree of pipeline model parallelism.')
-    group.add_argument('--pipeline-model-parallel-split-rank',
-                       type=int, default=None,
-                       help='Rank where encoder and decoder should be split.')
     group.add_argument('--model-parallel-size', type=int, default=None,
                        help='Old model parallel argument, do not use. Use '
                        '--tensor-model-parallel-size instead.')
@@ -661,10 +596,9 @@ def _add_distributed_args(parser):
                        choices=['local', 'torch'],
                        help='which DistributedDataParallel implementation '
                        'to use.')
-    group.add_argument('--no-contiguous-buffers-in-local-ddp',
-                       action='store_false', help='If set, dont use '
-                       'contiguous buffer in local DDP.',
-                       dest='use_contiguous_buffers_in_local_ddp')
+    group.add_argument('--use-contiguous-buffers-in-ddp', action='store_true',
+                       help='If set, use contiguous buffer in DDP. Note that '
+                       'this option only works woth local DDP.' )
     group.add_argument('--no-scatter-gather-tensors-in-pipeline', action='store_false',
                        help='Use scatter/gather to optimize communication of tensors in pipeline',
                        dest='scatter_gather_tensors_in_pipeline')
@@ -679,11 +613,6 @@ def _add_distributed_args(parser):
     group.add_argument('--use-cpu-initialization', action='store_true',
                        default=None, help='If set, affine parallel weights '
                        'initialization uses CPU' )
-    group.add_argument('--empty-unused-memory-level', default=0, type=int,
-                       choices=[0, 1, 2],
-                       help='Call torch.cuda.empty_cache() each iteration '
-                       '(training and eval), to reduce fragmentation.'
-                       '0=off, 1=moderate, 2=aggressive.')
     return parser
 
 
@@ -835,20 +764,67 @@ def _add_vit_args(parser):
 
     group.add_argument('--num-classes', type=int, default=1000,
                        help='num of classes in vision classificaiton task')
-    group.add_argument('--img-h', type=int, default=224,
-                       help='Image height for vision classification task')
-    group.add_argument('--img-w', type=int, default=224,
-                       help='Image height for vision classification task')
+    group.add_argument('--img-dim', type=int, default=224,
+                       help='Image size for vision classification task')
     group.add_argument('--num-channels', type=int, default=3,
                        help='Number of channels in input image data')
     group.add_argument('--patch-dim', type=int, default=16,
                        help='patch dimension used in vit')
-    group.add_argument('--classes-fraction', type=float, default=1.0,
-                       help='training with fraction of classes.')
-    group.add_argument('--data-per-class-fraction', type=float, default=1.0,
-                       help='training with fraction of data per class.')
-    group.add_argument('--no-data-sharding', action='store_false',
-                       help='Disable data sharding.',
-                       dest='data_sharding')
 
+    return parser
+
+
+def _add_zero_args(parser):
+    """Text generate arguments."""
+
+    group = parser.add_argument_group('ZeRO configurations', 'configurations')
+    group.add_argument("--zero-stage", type=int, default=1.0)
+    group.add_argument('--zero-reduce-scatter', action='store_true',
+                       help='Use reduce scatter if specified')
+    group.add_argument('--zero-contigious-gradients', action='store_true',
+                       help='Use contigious memory optimizaiton if specified')
+    group.add_argument("--zero-reduce-bucket-size", type=int, default=0.0)
+    group.add_argument("--zero-allgather-bucket-size", type=int, default=0.0)
+    group.add_argument('--remote-device', type=str, default='none', choices=['none', 'cpu', 'nvme'],
+                      help='Remote device for ZeRO-3 initialized parameters.')
+    group.add_argument('--use-pin-memory', action='store_true',
+                     help='Use pinned CPU memory for ZeRO-3 initialized model parameters.')
+    return parser
+
+def _add_memoryopt_args(parser):
+    """Memory optimization arguments."""
+
+    group = parser.add_argument_group('Memory optimizations', 'configurations')
+    group.add_argument("--scattered-embeddings", action='store_true',
+                       help='Save memory by scattering embedding activations. '
+                            'Introduces dropout differences across MP configurations.')
+    group.add_argument("--split-transformers", action='store_true',
+                       help='Save memory by splitting transformer layers into two parts, '
+                       'allowing for more frequent activation checkpoint savings.')
+    group.add_argument("--memory-centric-tiled-linear", action="store_true",
+                       help='Save memory by tiling with deepspeed.zero.TiledLinear.')
+    group.add_argument("--tile-factor", type=int, default=1,
+                       help='Make all linear layers the same size of [hidden/tile_factor, hidden/tile_factor]. '
+                            'Must be enabled with --memory-centric-tiled-linear. '
+                            'Example A: if tile_factor=1, the qkv layer [hidden, 3* hidden] would be converted into [1,3] tiles of size [hidden,hidden]. '
+                            'Example B: if tile_factor=2, the intermediate layer [4*hidden, hidden] will be converted into [8, 2] tiles of size [hidden/2, hidden/2]. '
+                            'Default is 1.')
+
+    return parser
+
+def _add_activation_checkpoint_args(parser):
+    group = parser.add_argument_group('Activation Checkpointing',
+                                      'Checkpointing Configurations')
+    group.add_argument('--deepspeed-activation-checkpointing', action='store_true',
+                       help='uses activation checkpointing from deepspeed')
+    group.add_argument('--partition-activations', action='store_true',
+                       help='partition Activations across GPUs before checkpointing.')
+    group.add_argument('--contigious-checkpointing', action='store_true',
+                       help='Contigious memory checkpointing for activatoins.')
+    group.add_argument('--checkpoint-in-cpu', action='store_true',
+                       help='Move the activation checkpoints to CPU.')
+    group.add_argument('--synchronize-each-layer', action='store_true',
+                       help='does a synchronize at the beginning and end of each checkpointed layer.')
+    group.add_argument('--profile-backward', action='store_true',
+                       help='Enables backward pass profiling for checkpointed layers.')
     return parser

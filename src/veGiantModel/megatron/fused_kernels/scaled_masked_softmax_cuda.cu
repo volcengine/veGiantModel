@@ -28,11 +28,6 @@ namespace multihead_attn {
 namespace fused_softmax {
 namespace scaled_masked_softmax {
 
-int get_batch_per_block_cuda(int query_seq_len, int key_seq_len, int batches, int attn_heads){
-    return get_batch_per_block(query_seq_len, key_seq_len, batches, attn_heads);
-}
-
-
 torch::Tensor fwd_cuda(
     torch::Tensor const& input,
     torch::Tensor const& mask,
@@ -44,7 +39,7 @@ torch::Tensor fwd_cuda(
   const int attn_heads = input.size(1);
   const int query_seq_len = input.size(2);
   const int key_seq_len = input.size(3);
-  TORCH_INTERNAL_ASSERT(key_seq_len <= 4096);
+  TORCH_INTERNAL_ASSERT(key_seq_len <= 2048);
   TORCH_INTERNAL_ASSERT(query_seq_len > 1);
   TORCH_INTERNAL_ASSERT(pad_batches == 1 || pad_batches == batches);
   TORCH_INTERNAL_ASSERT(mask.size(1) == 1);

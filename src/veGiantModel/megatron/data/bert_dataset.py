@@ -18,13 +18,13 @@
 import numpy as np
 import torch
 
-from megatron import (
+from veGiantModel.megatron import (
     get_args,
     get_tokenizer,
     mpu,
     print_rank_0
 )
-from megatron.data.dataset_utils import (
+from veGiantModel.megatron.data.dataset_utils import (
     get_samples_mapping,
     get_a_and_b_segments,
     truncate_segments,

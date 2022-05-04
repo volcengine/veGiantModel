@@ -21,8 +21,7 @@ import time
 
 import torch
 
-from . import dist_signal_handler
-from .tokenizer import build_tokenizer
+from veGiantModel.megatron.tokenizer import build_tokenizer
 from .arguments import parse_args
 from .microbatches import build_num_microbatches_calculator
 
@@ -32,7 +31,6 @@ _GLOBAL_TOKENIZER = None
 _GLOBAL_TENSORBOARD_WRITER = None
 _GLOBAL_ADLR_AUTORESUME = None
 _GLOBAL_TIMERS = None
-_GLOBAL_SIGNAL_HANDLER = None
 
 
 def get_args():
@@ -77,14 +75,6 @@ def get_timers():
     _ensure_var_is_initialized(_GLOBAL_TIMERS, 'timers')
     return _GLOBAL_TIMERS
 
-def get_signal_handler():
-    _ensure_var_is_initialized(_GLOBAL_SIGNAL_HANDLER, 'signal handler')
-    return _GLOBAL_SIGNAL_HANDLER
-
-def _set_signal_handler():
-    global _GLOBAL_SIGNAL_HANDLER
-    _ensure_var_is_not_initialized(_GLOBAL_SIGNAL_HANDLER, 'signal handler')
-    _GLOBAL_SIGNAL_HANDLER = dist_signal_handler.DistributedSignalHandler().__enter__()
 
 def set_global_variables(extra_args_provider=None, args_defaults={},
                          ignore_unknown_args=False):
@@ -98,9 +88,6 @@ def set_global_variables(extra_args_provider=None, args_defaults={},
     _set_tensorboard_writer(args)
     _set_adlr_autoresume(args)
     _set_timers()
-
-    if args.exit_signal_handler:
-        _set_signal_handler()
 
 
 def _parse_args(extra_args_provider=None, defaults={},

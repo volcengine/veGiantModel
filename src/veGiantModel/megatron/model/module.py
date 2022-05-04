@@ -51,13 +51,15 @@ class MegatronModule(torch.nn.Module):
 
 
     def word_embeddings_weight(self):
-        if self.pre_process:
+        if mpu.is_pipeline_first_stage(ignore_virtual=True):
             return self.language_model.embedding.word_embeddings.weight
-        else:
+        if mpu.is_pipeline_last_stage(ignore_virtual=True):
             if not self.share_word_embeddings:
                 raise Exception('word_embeddings_weight() called for last '
                                 'stage, but share_word_embeddings is false')
             return self.word_embeddings.weight
+        raise Exception('word_embeddings_weight() should be '
+                        'called for first and last stage only')
 
 
     def initialize_word_embeddings(self, init_method_normal):
@@ -67,12 +69,12 @@ class MegatronModule(torch.nn.Module):
                             'share_word_embeddings is false')
 
         # This function just initializes the word embeddings in the final stage
-        # when we are using pipeline parallelism. Nothing to do if we aren't
-        # using pipeline parallelism.
+        # when we are using pipeline parallelism. If we aren't using pipeline
+        # parallelism there is nothing to do.
         if args.pipeline_model_parallel_size == 1:
             return
 
-        # Parameters are shared between the word embeddings layers, and the
+        # Parameters are shared between the word embeddings layer, and the
         # heads at the end of the model. In a pipelined setup with more than
         # one stage, the initial embedding layer and the head are on different
         # workers, so we do the following:
@@ -84,8 +86,7 @@ class MegatronModule(torch.nn.Module):
         # 3. In the training loop, before an all-reduce between the grads of
         #    the two word_embeddings layers to ensure that every applied weight
         #    update is the same on both stages.
-        if mpu.is_pipeline_last_stage() and \
-                not self.pre_process:
+        if mpu.is_pipeline_last_stage():
             assert not mpu.is_pipeline_first_stage()
             self._word_embeddings_for_head_key = 'word_embeddings_for_head'
             # set word_embeddings weights to 0 here, then copy first
@@ -96,29 +97,12 @@ class MegatronModule(torch.nn.Module):
             self.word_embeddings.weight.data.fill_(0)
             self.word_embeddings.weight.shared = True
 
-        # Zero out initial weights for decoder embedding.
-        # NOTE: We don't currently support T5 with the interleaved schedule.
-        if not mpu.is_pipeline_first_stage(ignore_virtual=True) and \
-                self.pre_process:
-            self.language_model.embedding.zero_parameters()
-
         # Ensure that first and last stages have the same initial parameter
         # values.
         if torch.distributed.is_initialized():
-            if mpu.is_rank_in_embedding_group():
+            if mpu.is_pipeline_first_stage() or mpu.is_pipeline_last_stage():
                 torch.distributed.all_reduce(self.word_embeddings_weight().data,
                                              group=mpu.get_embedding_group())
-
-            # Ensure that encoder(first stage) and decoder(split stage) position 
-            # embeddings have the same initial parameter values
-            # NOTE: We don't currently support T5 with the interleaved schedule.
-            if mpu.is_rank_in_position_embedding_group() and \
-                    args.pipeline_model_parallel_split_rank is not None:
-                # TODO: Support tokentype embedding.
-                self.language_model.embedding.cuda()
-                position_embeddings = self.language_model.embedding.position_embeddings
-                torch.distributed.all_reduce(position_embeddings.weight.data,
-                                             group=mpu.get_position_embedding_group())
         else:
             print("WARNING! Distributed processes aren't initialized, so "
                   "word embeddings in the last layer are not initialized. "
@@ -180,10 +164,6 @@ class Float16Module(MegatronModule):
             raise Exception('should not be here')
 
         self.float16_convertor = float16_convertor
-
-
-    def set_input_tensor(self, input_tensor):
-        return self.module.set_input_tensor(input_tensor)
 
 
     def forward(self, *inputs, **kwargs):

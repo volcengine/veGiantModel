@@ -35,20 +35,23 @@ def _get_params_for_weight_decay_optimization(modules):
             if isinstance(module_, LayerNorm):
                 no_weight_decay_params['params'].extend(
                     [p for p in list(module_._parameters.values())
-                     if p is not None and p.requires_grad])
+                     if p is not None])
             else:
                 weight_decay_params['params'].extend(
                     [p for n, p in list(module_._parameters.items())
-                     if p is not None and p.requires_grad and n != 'bias'])
+                     if p is not None and n != 'bias'])
                 no_weight_decay_params['params'].extend(
                     [p for n, p in list(module_._parameters.items())
-                     if p is not None and p.requires_grad and n == 'bias'])
+                     if p is not None and n == 'bias'])
 
     return weight_decay_params, no_weight_decay_params
 
 
 def get_megatron_optimizer(model):
     args = get_args()
+
+    if args.cpu_optimizer:
+        raise NotImplementedError('need to add cpu adam')
 
     # Base optimizer.
     param_groups = _get_params_for_weight_decay_optimization(model)
@@ -66,6 +69,9 @@ def get_megatron_optimizer(model):
     else:
         raise Exception('{} optimizer is not supported.'.format(
             args.optimizer))
+
+    if args.deepspeed:
+        return optimizer
 
     # Determine whether the params have main-grad field.
     params_have_main_grad = False
@@ -100,12 +106,10 @@ def get_megatron_optimizer(model):
                                                  args.clip_grad,
                                                  args.log_num_zeros_in_grad,
                                                  params_have_main_grad,
-                                                 args.use_contiguous_buffers_in_local_ddp,
                                                  args.bf16,
                                                  grad_scaler)
 
     # FP32.
     return FP32Optimizer(optimizer, args.clip_grad,
                          args.log_num_zeros_in_grad,
-                         params_have_main_grad,
-                         args.use_contiguous_buffers_in_local_ddp)
+                         params_have_main_grad)

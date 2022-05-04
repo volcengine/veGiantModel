@@ -22,8 +22,8 @@ import random
 import torch
 from torch.utils.data import Dataset
 
-from megatron import print_rank_0, get_args, get_tokenizer, mpu
-from megatron.data.biencoder_dataset_utils import make_attention_mask
+from veGiantModel.megatron import print_rank_0, get_args, get_tokenizer, mpu
+from veGiantModel.megatron.data.biencoder_dataset_utils import make_attention_mask
 
 def get_open_retrieval_wiki_dataset():
     args = get_args()

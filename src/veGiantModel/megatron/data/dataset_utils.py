@@ -31,8 +31,8 @@ from veGiantModel.megatron import (
     mpu,
     print_rank_0
 )
-from .blendable_dataset import BlendableDataset
-from .indexed_dataset import make_dataset as make_indexed_dataset
+from veGiantModel.megatron.data.blendable_dataset import BlendableDataset
+from veGiantModel.megatron.data.indexed_dataset import make_dataset as make_indexed_dataset
 
 DSET_TYPE_BERT = 'standard_bert'
 DSET_TYPE_ICT = 'ict'
@@ -515,9 +515,9 @@ def _build_train_valid_test_datasets(data_prefix, data_impl, splits_string,
     print_split_stats('test', 2)
 
     def build_dataset(index, name):
-        from megatron.data.bert_dataset import BertDataset
-        from megatron.data.ict_dataset import ICTDataset
-        from megatron.data.t5_dataset import T5Dataset
+        from veGiantModel.megatron.data.bert_dataset import BertDataset
+        from veGiantModel.megatron.data.ict_dataset import ICTDataset
+        from veGiantModel.megatron.data.t5_dataset import T5Dataset
         dataset = None
         if splits[index + 1] > splits[index]:
             # Get the pointer to the original doc-idx so we can set it later.
@@ -674,10 +674,10 @@ def get_samples_mapping(indexed_dataset,
         # Build samples mapping
         verbose = torch.distributed.get_rank() == 0
         start_time = time.time()
-        print_rank_0(' > building samples index mapping for {} ...'.format(
+        print_rank_0(' > building sapmles index mapping for {} ...'.format(
             name))
         # First compile and then import.
-        from megatron.data import helpers
+        from veGiantModel.megatron.data import helpers
         samples_mapping = helpers.build_mapping(
             indexed_dataset.doc_idx,
             indexed_dataset.sizes,
@@ -688,7 +688,7 @@ def get_samples_mapping(indexed_dataset,
             seed,
             verbose,
             2 if binary_head else 1)
-        print_rank_0(' > done building samples index maping')
+        print_rank_0(' > done building sapmles index maping')
         np.save(indexmap_filename, samples_mapping, allow_pickle=True)
         print_rank_0(' > saved the index mapping in {}'.format(
             indexmap_filename))

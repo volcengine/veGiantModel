@@ -21,16 +21,17 @@ import time
 
 import numpy as np
 import torch
-from datetime import timedelta
 
-from . import fused_kernels
-from . import get_adlr_autoresume
-from . import get_args
-from . import get_tensorboard_writer
-from . import mpu
-from .global_vars import set_global_variables
-from .mpu import (set_tensor_model_parallel_rank,
-                          set_tensor_model_parallel_world_size)
+from veGiantModel.megatron import fused_kernels
+from veGiantModel.megatron import get_adlr_autoresume
+from veGiantModel.megatron import get_args
+from veGiantModel.megatron import get_tensorboard_writer
+from veGiantModel.megatron import mpu
+from veGiantModel.megatron.global_vars import set_global_variables
+from veGiantModel.megatron.mpu import (set_tensor_model_parallel_rank,
+                                       set_tensor_model_parallel_world_size)
+
+import deepspeed
 
 
 def initialize_megatron(extra_args_provider=None, args_defaults={},
@@ -58,28 +59,28 @@ def initialize_megatron(extra_args_provider=None, args_defaults={},
         args = get_args()
         # Pytorch distributed.
         _initialize_distributed()
-        
+
         # Random seeds for reproducibility.
         if args.rank == 0:
             print('> setting random seeds to {} ...'.format(args.seed))
-        _set_random_seed(args.seed, args.data_parallel_random_init)
-
-    # Set pytorch JIT layer fusion options.
-    _set_jit_fusion_options()
+        _set_random_seed(args.seed)
 
     args = get_args()
-    if  args.lazy_mpu_init:
-        args.use_cpu_initialization=True
+    if args.lazy_mpu_init:
+        args.use_cpu_initialization = True
         # delayed initialization of DDP-related stuff
-        # We only set basic DDP globals    
+        # We only set basic DDP globals
         set_tensor_model_parallel_world_size(args.tensor_model_parallel_size)
         # and return function for external DDP manager
         # to call when it has DDP initialized
-        set_tensor_model_parallel_rank(args.rank)    
+        set_tensor_model_parallel_rank(args.rank)
         return finish_mpu_init
     else:
         # Megatron's MPU is the master. Complete initialization right away.
         finish_mpu_init()
+
+        # Initialize memory buffers.
+        _initialize_mem_buffs()
 
         # Autoresume.
         _init_autoresume()
@@ -102,7 +103,7 @@ def _compile_dependencies():
     if torch.distributed.get_rank() == 0:
         start_time = time.time()
         print('> compiling dataset index builder ...')
-        from megatron.data.dataset_utils import compile_helper
+        from veGiantModel.megatron.data.dataset_utils import compile_helper
         compile_helper()
         print('>>> done with dataset index builder. Compilation time: {:.3f} '
               'seconds'.format(time.time() - start_time), flush=True)
@@ -118,7 +119,7 @@ def _compile_dependencies():
         args.micro_batch_size
     # Constraints on sequence length and attn_batch_size to enable warp based
     # optimization and upper triangular optimization (for causal mask)
-    custom_kernel_constraint = seq_len > 16 and seq_len <=4096 and \
+    custom_kernel_constraint = seq_len > 16 and seq_len <= 2048 and \
         seq_len % 4 == 0 and attn_batch_size % 4 == 0
     # Print a warning.
     if not ((args.fp16 or args.bf16) and
@@ -128,7 +129,7 @@ def _compile_dependencies():
             print('WARNING: constraints for invoking optimized'
                   ' fused softmax kernel are not met. We default'
                   ' back to unfused kernel invocations.', flush=True)
-    
+
     # Always build on rank zero first.
     if torch.distributed.get_rank() == 0:
         start_time = time.time()
@@ -148,6 +149,36 @@ def _compile_dependencies():
               'Compilation time: {:.3f} seconds'.format(
                   time.time() - start_time), flush=True)
 
+
+def setup_deepspeed_random_and_activation_checkpointing(args):
+    '''Optional DeepSpeed Activation Checkpointing features.
+    Gives access to partition activations, contiguous memory optimizations
+    and cpu checkpointing.
+    Activation checkpoint requires keep track of the random states
+    and setting the random seed for each MP process. Megatron uses
+    mpu.get_cuda_rng_tracker and mpu.model_parallel_cuda_manual_seed
+    for keeping track of the random states and setting the random seeds.
+    Since they are used in places outside of activation checkpointing,
+    we overwrite them to maintain consistency.
+    This must be called before all the calls to mpu.model_parallel_cuda_manual_seed
+    '''
+    num_layers = args.num_layers // args.checkpoint_num_layers
+    num_layers = num_layers if args.num_layers % args.checkpoint_num_layers == 0 else num_layers + 1
+    if args.split_transformers:
+        num_layers *= 2
+
+    deepspeed.checkpointing.configure(
+        mpu,
+        partition_activations=args.partition_activations,
+        contiguous_checkpointing=args.contigious_checkpointing,
+        num_checkpoints=num_layers,
+        checkpoint_in_cpu=args.checkpoint_in_cpu,
+        synchronize=args.synchronize_each_layer,
+        profile=args.profile_backward)
+
+    mpu.checkpoint = deepspeed.checkpointing.checkpoint
+    mpu.get_cuda_rng_tracker = deepspeed.checkpointing.get_cuda_rng_tracker
+    mpu.model_parallel_cuda_manual_seed = deepspeed.checkpointing.model_parallel_cuda_manual_seed
 
 
 def _initialize_distributed():
@@ -176,11 +207,16 @@ def _initialize_distributed():
             else:
                 args.local_rank = device
             torch.cuda.set_device(device)
-    # Call the init process
-    torch.distributed.init_process_group(
-        backend=args.distributed_backend,
-        world_size=args.world_size, rank=args.rank,
-        timeout=timedelta(minutes=10))
+        # Call the init process
+        init_method = 'tcp://'
+        master_ip = os.getenv('MASTER_ADDR', 'localhost')
+        master_port = os.getenv('MASTER_PORT', '6000')
+        init_method += master_ip + ':' + master_port
+        print(f'init with {args.distributed_backend}, ws {args.world_size}, rank {args.rank}, {init_method}')
+        torch.distributed.init_process_group(
+            backend=args.distributed_backend,
+            world_size=args.world_size, rank=args.rank,
+            init_method=init_method)
 
     # Set the tensor model-parallel, pipeline model-parallel, and
     # data-parallel communicators.
@@ -190,8 +226,10 @@ def _initialize_distributed():
         else:
             mpu.initialize_model_parallel(args.tensor_model_parallel_size,
                                           args.pipeline_model_parallel_size,
-                                          args.virtual_pipeline_model_parallel_size,
-                                          args.pipeline_model_parallel_split_rank)
+                                          args.virtual_pipeline_model_parallel_size)
+
+    if args.deepspeed and args.deepspeed_activation_checkpointing:
+        setup_deepspeed_random_and_activation_checkpointing(args)
 
 
 def _init_autoresume():
@@ -203,14 +241,11 @@ def _init_autoresume():
         torch.distributed.barrier()
 
 
-def _set_random_seed(seed_, data_parallel_random_init=False):
+def _set_random_seed(seed_):
     """Set random seed for reproducability."""
     if seed_ is not None and seed_ > 0:
         # Ensure that different pipeline MP stages get different seeds.
         seed = seed_ + (100 * mpu.get_pipeline_model_parallel_rank())
-        # Ensure different data parallel ranks get different seeds
-        if data_parallel_random_init:
-            seed = seed + (10 * mpu.get_data_parallel_rank())
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
@@ -230,24 +265,10 @@ def write_args_to_tensorboard():
                             global_step=args.iteration)
 
 
-def _set_jit_fusion_options():
-    """Set PyTorch JIT layer fusion options."""
-    # flags required to enable jit fusion kernels
-    TORCH_MAJOR = int(torch.__version__.split('.')[0])
-    TORCH_MINOR = int(torch.__version__.split('.')[1])
-    if (TORCH_MAJOR > 1) or (TORCH_MAJOR == 1 and TORCH_MINOR >= 10):
-        # nvfuser
-        torch._C._jit_set_profiling_executor(True)
-        torch._C._jit_set_profiling_mode(True)
-        torch._C._jit_override_can_fuse_on_cpu(False)
-        torch._C._jit_override_can_fuse_on_gpu(False)
-        torch._C._jit_set_texpr_fuser_enabled(False)
-        torch._C._jit_set_nvfuser_enabled(True)
-        torch._C._debug_set_autodiff_subgraph_inlining(False)
-    else:
-        # legacy pytorch fuser
-        torch._C._jit_set_profiling_mode(False)
-        torch._C._jit_set_profiling_executor(False)
-        torch._C._jit_override_can_fuse_on_cpu(True)
-        torch._C._jit_override_can_fuse_on_gpu(True)
+def _initialize_mem_buffs():
+    """Initialize manually allocated static memory."""
+    args = get_args()
 
+    # Initialize memory for checkpointed activations.
+    if args.distribute_checkpointed_activations:
+        mpu.init_checkpointed_activations_memory_buffer()

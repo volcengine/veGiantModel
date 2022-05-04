@@ -2,8 +2,8 @@
 # put some code used during development and manual testing of
 # indexed_dataset.
 
-from megatron.data import indexed_dataset
-from megatron.tokenizer import build_tokenizer
+from veGiantModel.megatron.data import indexed_dataset
+from veGiantModel.megatron.tokenizer import build_tokenizer
 import argparse
 import os
 import sys

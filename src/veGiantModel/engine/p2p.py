@@ -26,15 +26,15 @@ DS_PIPE_VERBOSE = os.environ.get('DS_PIPE_VERBOSE', "0") != "0"
 
 did_recv = False
 send_stream = None
-recv_stream = None 
+recv_stream = None
 
 
 bps_send_handles = {}
 bps_recv_handles = {}
 
 
-#initializes adjacent process groups
-#run this only after torch.distributed.init_process_group() has been called
+# initializes adjacent process groups
+# run this only after torch.distributed.init_process_group() has been called
 def init_process_groups(grid):
     global _groups, _grid
     _grid = grid
@@ -50,7 +50,7 @@ def _is_valid_send_recv(src_stage, dest_stage):
     assert abs(src_stage-dest_stage) == 1 or \
         (src_stage == first_stage and dest_stage == last_stage) or \
         (src_stage == last_stage and dest_stage == first_stage), \
-    "Functionality currently limited to send and receive between adjacent ranks only"
+        "Functionality currently limited to send and receive between adjacent ranks only"
 
 
 def send(tensor, dest_stage, async_op=False):
@@ -68,8 +68,10 @@ def send(tensor, dest_stage, async_op=False):
         print('warning: p2p send', tensor.dtype, tensor.shape, flush=True)
     return _send(tensor, src_rank, group, async_op)
 
+
 def _bps_get_name(src, dest, name, suffix):
     return "_".join([str(src), str(dest), str(name), str(suffix)])
+
 
 def bps_send(tensor, dest_stage, name, index, async_op=True):
     global bps_send_handles
@@ -94,6 +96,7 @@ def bps_send(tensor, dest_stage, name, index, async_op=True):
         bps_send_handles[name][index] = handle
     return tensor
 
+
 def bps_sync(src_stage, name, index=0):
     dest_stage = _grid.get_stage_id()
     _is_valid_send_recv(src_stage, dest_stage)
@@ -105,6 +108,7 @@ def bps_sync(src_stage, name, index=0):
         if handle is not None:
             bps.synchronize(handle)
 
+
 def bps_sync_all():
     for name, handles in bps_send_handles.items():
         for handle in handles:
@@ -115,6 +119,7 @@ def bps_sync_all():
         for handle in handles:
             if handle is not None:
                 bps.synchronize(handle)
+
 
 def bps_recv(tensor, src_stage, name, index=0, async_op=True):
     global bps_recv_handles
@@ -143,15 +148,21 @@ def _send(tensor, src_rank, group, async_op):
     global did_recv
     return dist.broadcast(tensor, src_rank, group=group, async_op=async_op)
 
+
 def send_grads(tensor, grid, async_op=False):
     async_op = False
-    if  grid.send_grads_src_rank == grid.global_rank:
-        # print(f'start rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, _send_grad_src_rank: {grid.send_grads_src_rank}, send group: {grid.send_grads_group}, send_grad_groups: {grid.send_grads_proc_group}', flush=True)
+    if grid.send_grads_src_rank == grid.global_rank:
+        # print(f'start rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, '
+        #       f'_send_grad_src_rank: {grid.send_grads_src_rank}, send group: {grid.send_grads_group}, '
+        #       f'send_grad_groups: {grid.send_grads_proc_group}', flush=True)
         _send(tensor, grid.send_grads_src_rank, grid.send_grads_proc_group, async_op)
-        # print(f'finis rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, _send_grad_src_rank: {grid.send_grads_src_rank}, send group: {grid.send_grads_group}', flush=True)
+        # print(f'finis rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, '
+        #       f'_send_grad_src_rank: {grid.send_grads_src_rank}, send group: {grid.send_grads_group}', flush=True)
     else:
-        # print(f'finish fast rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, _send_grad_src_rank: {grid.send_grads_src_rank}, send group: {grid.send_grads_group}', flush=True)
+        # print(f'finish fast rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, '
+        #       f'_send_grad_src_rank: {grid.send_grads_src_rank}, send group: {grid.send_grads_group}', flush=True)
         pass
+
 
 def _recv(tensor, src_rank, group, async_op):
     global did_recv
@@ -159,28 +170,41 @@ def _recv(tensor, src_rank, group, async_op):
     did_recv = True
     return tensor
 
+
 def recv_grads(tensor, grid, async_op=False):
     async_op = False
-    # print(f'start rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, _recv_grad_src_rank: {grid.recv_grads_src_rank}, recv group: {grid.recv_grads_group}, recv_grad_groups: {grid.recv_grads_proc_group}', flush=True)
+    # print(f'start rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, '
+    #       f'_recv_grad_src_rank: {grid.recv_grads_src_rank}, recv group: {grid.recv_grads_group}, '
+    #       f'recv_grad_groups: {grid.recv_grads_proc_group}', flush=True)
     _recv(tensor, grid.recv_grads_src_rank, grid.recv_grads_proc_group, async_op)
-    # print(f'finish rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, _recv_grad_src_rank: {grid.recv_grads_src_rank}, recv group: {grid.recv_grads_group}', flush=True)
+    # print(f'finish rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, '
+    #       f'_recv_grad_src_rank: {grid.recv_grads_src_rank}, recv group: {grid.recv_grads_group}', flush=True)
 
 
 def send_activations(tensor, grid, async_op=False):
     async_op = False
-    if  grid.send_activation_src_rank == grid.global_rank:
-        # print(f'start rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, _send_grad_src_rank: {grid.send_grads_src_rank}, send group: {grid.send_grads_group}, send_grad_groups: {grid.send_grads_proc_group}', flush=True)
+    if grid.send_activation_src_rank == grid.global_rank:
+        # print(f'start rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, '
+        #       f'_send_grad_src_rank: {grid.send_grads_src_rank}, send group: {grid.send_grads_group}, '
+        #       f'send_grad_groups: {grid.send_grads_proc_group}', flush=True)
         _send(tensor, grid.send_activation_src_rank, grid.send_activation_proc_group, async_op)
-        # print(f'finis rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, _send_grad_src_rank: {grid.send_grads_src_rank}, send group: {grid.send_grads_group}', flush=True)
+        # print(f'finis rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, '
+        #       f'_send_grad_src_rank: {grid.send_grads_src_rank}, send group: {grid.send_grads_group}', flush=True)
     else:
-        # print(f'finish fast rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, _send_grad_src_rank: {grid.send_grads_src_rank}, send group: {grid.send_grads_group}', flush=True)
-        pass 
+        # print(f'finish fast rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, '
+        #       f'_send_grad_src_rank: {grid.send_grads_src_rank}, send group: {grid.send_grads_group}', flush=True)
+        pass
+
 
 def recv_activations(tensor, grid, async_op=False):
     async_op = False
-    # print(f'start rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, _recv_grad_src_rank: {grid.recv_grads_src_rank}, recv group: {grid.recv_grads_group}, recv_grad_groups: {grid.recv_grads_proc_group}', flush=True)
+    # print(f'start rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, '
+    #       f'_recv_grad_src_rank: {grid.recv_grads_src_rank}, recv group: {grid.recv_grads_group}, '
+    #       f'recv_grad_groups: {grid.recv_grads_proc_group}', flush=True)
     _recv(tensor, grid.recv_activation_src_rank, grid.recv_activation_proc_group, async_op)
-    # print(f'finish rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, _recv_grad_src_rank: {grid.recv_grads_src_rank}, recv group: {grid.recv_grads_group}', flush=True)
+    # print(f'finish rank: {grid.global_rank}, stage_id: {grid.stage_id}, mp_id: {grid.model_parallel_id}, '
+    #       f'_recv_grad_src_rank: {grid.recv_grads_src_rank}, recv group: {grid.recv_grads_group}', flush=True)
+
 
 def recv(tensor, src_stage, async_op=False):
     global _groups

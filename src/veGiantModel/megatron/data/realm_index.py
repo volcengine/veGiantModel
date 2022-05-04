@@ -6,8 +6,8 @@ import shutil
 import numpy as np
 import torch
 
-from megatron import get_args
-from megatron import mpu
+from veGiantModel.megatron import get_args
+from veGiantModel.megatron import mpu
 
 
 def detach(tensor):

@@ -4,10 +4,10 @@ import time
 import numpy as np
 import torch
 
-from megatron import get_args, get_tokenizer, mpu, print_rank_0
-from megatron.data.dataset_utils import create_masked_lm_predictions, \
+from veGiantModel.megatron import get_args, get_tokenizer, mpu, print_rank_0
+from veGiantModel.megatron.data.dataset_utils import create_masked_lm_predictions, \
                                             pad_and_convert_to_numpy
-from megatron.data.data_samplers import MegatronPretrainingSampler
+from veGiantModel.megatron.data.data_samplers import MegatronPretrainingSampler
 
 def make_attention_mask(source_block, target_block):
     """
@@ -162,7 +162,7 @@ def get_block_samples_mapping(block_dataset, title_dataset, data_prefix, num_epo
         print_rank_0(' > building samples index mapping for {} ...'.format(
             name))
 
-        from megatron.data import helpers
+        from veGiantModel.megatron.data import helpers
         mapping_array = helpers.build_blocks_mapping(
             block_dataset.doc_idx,
             block_dataset.sizes,
