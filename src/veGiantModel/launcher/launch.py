@@ -106,8 +106,8 @@ def setup_env(local_rank):
     assert gpu_per_node >= mp_size
     assert gpu_per_node % mp_size == 0
 
-    # os.environ['BYTEPS_RDMA_START_DEPTH'] = str(32)
-    # os.environ['BYTEPS_RDMA_RX_DEPTH'] = str(512)
+    os.environ['BYTEPS_RDMA_START_DEPTH'] = str(32)
+    os.environ['BYTEPS_RDMA_RX_DEPTH'] = str(512)
 
     os.environ['DMLC_NUM_WORKER'] = str(gpu_per_node * num_nodes)
     os.environ['DMLC_NUM_SERVER'] = str(gpu_per_node * num_nodes)
@@ -120,24 +120,24 @@ def setup_env(local_rank):
 
     if 'DMLC_ENABLE_RDMA' not in os.environ:
         os.environ['DMLC_ENABLE_RDMA'] = '1'
-    # os.environ['DMLC_ENABLE_UCX'] = os.environ.get('DMLC_ENABLE_UCX', '1')
-    # os.environ['UCX_IB_TRAFFIC_CLASS'] = '236'
-    # os.environ['UCX_TLS'] = os.environ.get('UCX_TLS', 'rc_x,tcp,sm')
-    # nvidia_smi = f'nvidia-smi -L'
-    # devices = os.popen(nvidia_smi).read().strip()
-    # if 'A100' in devices:
-    #     nic = get_nic(local_rank)
-    #     ip_cmd = f'ip addr show eth{nic}'
-    #     ip = os.popen(ip_cmd + ' | grep "\<inet\>" | awk \'{ print $2 }\' | awk -F "/" \'{ print $1 }\'').read().strip()
-    #     os.environ['UCX_RDMA_CM_SOURCE_ADDRESS'] = os.environ.get('UCX_RDMA_CM_SOURCE_ADDRESS', ip)
-    #     devs = os.environ.get('UCX_NET_DEVICES', f'mlx5_{nic}:1,eth0,eth1,eth2,eth3')
-    #     os.environ['UCX_NET_DEVICES'] = devs
-    #     os.environ['DMLC_NODE_HOST'] = os.environ['UCX_RDMA_CM_SOURCE_ADDRESS']
-    # elif 'V100' in devices or 'T4' in devices:
-    #     devs = os.environ.get('UCX_NET_DEVICES', 'mlx5_2:1,eth0,eth2')
-    #     os.environ['UCX_NET_DEVICES'] = devs
-    # else:
-    #     raise RuntimeError(f"Unknown devices: {devices}")
+    os.environ['DMLC_ENABLE_UCX'] = os.environ.get('DMLC_ENABLE_UCX', '1')
+    os.environ['UCX_IB_TRAFFIC_CLASS'] = '236'
+    os.environ['UCX_TLS'] = os.environ.get('UCX_TLS', 'rc_x,tcp,sm')
+    nvidia_smi = f'nvidia-smi -L'
+    devices = os.popen(nvidia_smi).read().strip()
+    if 'A100' in devices:
+        nic = get_nic(local_rank)
+        ip_cmd = f'ip addr show eth{nic}'
+        ip = os.popen(ip_cmd + ' | grep "\<inet\>" | awk \'{ print $2 }\' | awk -F "/" \'{ print $1 }\'').read().strip()
+        os.environ['UCX_RDMA_CM_SOURCE_ADDRESS'] = os.environ.get('UCX_RDMA_CM_SOURCE_ADDRESS', ip)
+        devs = os.environ.get('UCX_NET_DEVICES', f'mlx5_{nic}:1,eth0,eth1,eth2,eth3')
+        os.environ['UCX_NET_DEVICES'] = devs
+        os.environ['DMLC_NODE_HOST'] = os.environ['UCX_RDMA_CM_SOURCE_ADDRESS']
+    elif 'V100' in devices or 'T4' in devices:
+        devs = os.environ.get('UCX_NET_DEVICES', 'mlx5_2:1,eth0,eth2')
+        os.environ['UCX_NET_DEVICES'] = devs
+    else:
+        raise RuntimeError(f"Unknown devices: {devices}")
 
 
 def launch_bps(local_rank):
