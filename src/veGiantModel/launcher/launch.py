@@ -10,7 +10,7 @@ import sys
 import threading
 
 from deepspeed.utils import log_dist
-from veGiantModel.megatron import mpu
+from megatron import mpu
 
 
 class PropagatingThread(threading.Thread):

@@ -15,45 +15,38 @@
 
 """Pretrain utilities."""
 
-from datetime import datetime
+import json
 import math
 import sys
 import time
-import json
+from datetime import datetime
+
 # The earliest we can measure the start time.
-_TRAIN_START_TIME = time.time()
-
-import torch
-from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
-
-from veGiantModel.megatron import get_args
-from veGiantModel.megatron import get_timers
-from veGiantModel.megatron import get_tensorboard_writer
-from veGiantModel.megatron import get_current_global_batch_size
-from veGiantModel.megatron import get_num_microbatches
-from veGiantModel.megatron import is_last_rank
-from veGiantModel.megatron import update_num_microbatches
-from veGiantModel.megatron import mpu
-from veGiantModel.megatron import print_rank_0
-from veGiantModel.megatron import print_rank_last
-from veGiantModel.megatron.checkpointing import load_checkpoint
-from veGiantModel.megatron.checkpointing import save_checkpoint
-from veGiantModel.megatron.model import Float16Module
-from veGiantModel.megatron.optimizer import get_megatron_optimizer
-from veGiantModel.megatron.initialize import initialize_megatron
-from veGiantModel.megatron.initialize import write_args_to_tensorboard
-from veGiantModel.megatron.learning_rates import AnnealingLR
-from veGiantModel.megatron.model import DistributedDataParallel as LocalDDP
-from veGiantModel.megatron.utils import check_adlr_autoresume_termination
-from veGiantModel.megatron.utils import unwrap_model
-from veGiantModel.megatron.data.data_samplers import build_pretraining_data_loader
-from veGiantModel.megatron.utils import calc_params_l2_norm
-from veGiantModel.megatron.schedules import forward_backward_no_pipelining
-from veGiantModel.megatron.schedules import forward_backward_pipelining_without_interleaving
-from veGiantModel.megatron.schedules import forward_backward_pipelining_with_interleaving
-from veGiantModel.megatron.utils import report_memory, flops_calculator
+_TRAIN_START_TIME = time.time() # noqa
 
 import deepspeed
+import torch
+from megatron import (get_args, get_current_global_batch_size,
+                      get_num_microbatches, get_tensorboard_writer, get_timers,
+                      is_last_rank, mpu, print_rank_0, print_rank_last,
+                      update_num_microbatches)
+from megatron.checkpointing import load_checkpoint, save_checkpoint
+from megatron.data.data_samplers import build_pretraining_data_loader
+from megatron.initialize import initialize_megatron, write_args_to_tensorboard
+from megatron.learning_rates import AnnealingLR
+from megatron.model import DistributedDataParallel as LocalDDP
+from megatron.model import Float16Module
+from megatron.optimizer import get_megatron_optimizer
+from megatron.schedules import (
+    forward_backward_no_pipelining,
+    forward_backward_pipelining_with_interleaving,
+    forward_backward_pipelining_without_interleaving)
+from megatron.utils import (calc_params_l2_norm,
+                            check_adlr_autoresume_termination,
+                            flops_calculator, report_memory, unwrap_model)
+from torch.nn.parallel.distributed import DistributedDataParallel as torchDDP
+
+import veGiantModel
 
 
 def print_datetime(string):
@@ -115,13 +108,13 @@ def pretrain(train_valid_test_dataset_provider,
         args.deepspeed_configuration = json.load(
             open(args.deepspeed_config, 'r', encoding='utf-8'))
         if "curriculum_learning" in args.deepspeed_configuration and \
-            "enabled" in args.deepspeed_configuration["curriculum_learning"]:
-            args.curriculum_learning = args.deepspeed_configuration[ \
+           "enabled" in args.deepspeed_configuration["curriculum_learning"]:
+            args.curriculum_learning = args.deepspeed_configuration[
                 "curriculum_learning"]["enabled"]
         if args.curriculum_learning and args.pipeline_model_parallel_size >= 1:
-            from deepspeed.runtime.data_pipeline.curriculum_scheduler \
-                import CurriculumScheduler
-            args.curriculum_scheduler = CurriculumScheduler( \
+            from deepspeed.runtime.data_pipeline.curriculum_scheduler import \
+                CurriculumScheduler
+            args.curriculum_scheduler = CurriculumScheduler(
                 args.deepspeed_configuration["curriculum_learning"])
 
     # Model, optimizer, and learning rate.
@@ -200,8 +193,7 @@ def update_train_iters(args):
         update_num_microbatches(0, consistency_check=False)
         # Constant phase
         # Note that we throw away any partial last batch.
-        iterations += (args.train_samples - consumed_samples) // \
-                       args.global_batch_size
+        iterations += (args.train_samples - consumed_samples) // args.global_batch_size
         args.train_iters = iterations
 
     print_rank_0('setting training iterations to {}'.format(args.train_iters))
@@ -339,10 +331,9 @@ def setup_model_and_optimizer(model_provider_func):
 
     if args.deepspeed:
         print_rank_0("DeepSpeed is enabled.")
-        pp = mpu.get_pipeline_model_parallel_world_size()
+        # pp = mpu.get_pipeline_model_parallel_world_size()
         if args.vegiantmodel:
             print_rank_0("veGiantModel is enabled.")
-            import veGiantModel
             model, optimizer, _, lr_scheduler = veGiantModel.initialize(
                 model=model[0],
                 optimizer=optimizer,
@@ -384,7 +375,8 @@ def setup_model_and_optimizer(model_provider_func):
 
     # get model without FP16 and/or TorchDDP wrappers
     if args.iteration == 0 and len(unwrapped_model) == 1 \
-        and hasattr(unwrapped_model[0], 'init_state_dict_from_bert'):
+       and hasattr(unwrapped_model[0], 'init_state_dict_from_bert'):
+
         print_rank_0("Initializing ICT from pretrained BERT model")
         unwrapped_model[0].init_state_dict_from_bert()
         if args.fp16:
@@ -529,9 +521,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
                 key, torch.cuda.FloatTensor([0.0])) + loss_dict[key]
         else:
             value = loss_dict[key].float().sum().item()
-            is_nan = value == float('inf') or \
-                     value == -float('inf') or \
-                     value != value
+            is_nan = value == float('inf') or value == -float('inf') or value != value
             got_nan = got_nan or is_nan
     total_loss_dict[nan_iters_key] = total_loss_dict.get(
         nan_iters_key, 0) + int(got_nan)
@@ -564,8 +554,7 @@ def training_log(loss_dict, total_loss_dict, learning_rate, iteration,
     batch_size = args.micro_batch_size * args.data_parallel_size * \
         get_num_microbatches()
 
-    total_iterations = total_loss_dict[advanced_iters_key] + \
-                       total_loss_dict[skipped_iters_key]
+    total_iterations = total_loss_dict[advanced_iters_key] + total_loss_dict[skipped_iters_key]
 
     # Tensorboard values.
     if writer and (iteration % args.tensorboard_log_interval == 0) and \
@@ -712,8 +701,7 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
     timers('interval-time').start()
     print_datetime('before the start of training step')
     report_memory_flag = True
-    while iteration < args.train_iters and (args.train_tokens is None or \
-        args.consumed_train_tokens < args.train_tokens):
+    while iteration < args.train_iters and (args.train_tokens is None or args.consumed_train_tokens < args.train_tokens):
         update_num_microbatches(args.consumed_train_samples)
         if args.deepspeed:
             # inform deepspeed of any batch size changes
@@ -723,7 +711,7 @@ def train(forward_step_func, model, optimizer, lr_scheduler,
             model[0].set_train_batch_size(global_batch_size)
 
         if args.curriculum_learning and args.pipeline_model_parallel_size >= 1:
-            args.curriculum_seqlen = args.curriculum_scheduler.update_difficulty( \
+            args.curriculum_seqlen = args.curriculum_scheduler.update_difficulty(
                     args.iteration + 1)
         loss_dict, skipped_iter, grad_norm, num_zeros_in_grad = \
             train_step(forward_step_func,
@@ -859,9 +847,7 @@ def evaluate(forward_step_func, data_iterator, model, verbose=False):
                         total_loss_dict[key] = total_loss_dict.get(
                             key, torch.cuda.FloatTensor([0.0])) + loss_dict[key]
 
-            args.consumed_valid_samples += mpu.get_data_parallel_world_size() \
-                                           * args.micro_batch_size \
-                                           * get_num_microbatches()
+            args.consumed_valid_samples += mpu.get_data_parallel_world_size() * args.micro_batch_size * get_num_microbatches()
     # Move model back to the train mode.
     for model_module in model:
         model_module.train()
@@ -871,7 +857,7 @@ def evaluate(forward_step_func, data_iterator, model, verbose=False):
 
     if args.curriculum_learning and args.pipeline_model_parallel_size >= 1:
         # roll back to actual curriculum seqlen at the end of eval.
-        args.curriculum_seqlen = args.curriculum_scheduler.update_difficulty( \
+        args.curriculum_seqlen = args.curriculum_scheduler.update_difficulty(
             args.iteration + 1)
         if args.curriculum_seqlen < args.seq_length:
             model[0].reset_activation_shape()
@@ -988,7 +974,6 @@ def build_train_valid_test_data_iterators(
     args.do_train = flags[0].item()
     args.do_valid = flags[1].item()
     args.do_test = flags[2].item()
-
 
     # Build iterators.
     dl_type = args.dataloader_type

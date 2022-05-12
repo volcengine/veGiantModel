@@ -11,20 +11,20 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 
 import torch
 from deepspeed.pipe import LayerSpec, TiedLayerSpec
+from deepspeed.runtime.pipe.topology import PipeModelDataParallelTopology
+from megatron import get_args, mpu
+from megatron.model.enums import AttnMaskType
+from megatron.model.language_model import EmbeddingPipe, parallel_lm_logits
+from megatron.model.module import float16_to_fp32, fp32_to_float16
+from megatron.model.transformer import LayerNorm, ParallelTransformerLayerPipe
+from megatron.model.utils import init_method_normal, scaled_init_method_normal
+
 from veGiantModel.engine.module import veGiantModule
-from veGiantModel.megatron import get_args, mpu
-from veGiantModel.megatron.model.enums import AttnMaskType
-from veGiantModel.megatron.model.language_model import (EmbeddingPipe,
-                                                        parallel_lm_logits)
-from veGiantModel.megatron.model.module import (float16_to_fp32,
-                                                fp32_to_float16)
-from veGiantModel.megatron.model.transformer import (
-    LayerNorm, ParallelTransformerLayerPipe)
-from veGiantModel.megatron.model.utils import (init_method_normal,
-                                               scaled_init_method_normal)
+from veGiantModel.launcher.launch import launch_bps
 
 
 def CrossEntropy(output, labels):
@@ -122,9 +122,6 @@ class GPTModelPipe(veGiantModule):
         # else:
         interval = 0
 
-        from veGiantModel.launcher.launch import launch_bps
-        import os
-
         rank = int(os.getenv('RANK', '0'))
         device_count = torch.cuda.device_count()
         local_rank = rank % device_count
@@ -134,7 +131,6 @@ class GPTModelPipe(veGiantModule):
             assert bps is not None
             launch_bps(local_rank)
 
-        from deepspeed.runtime.pipe.topology import PipeModelDataParallelTopology
         topo = PipeModelDataParallelTopology(num_pp=mpu.get_pipeline_model_parallel_world_size(),
                                              num_mp=mpu.get_tensor_model_parallel_world_size(),
                                              num_dp=mpu.get_data_parallel_world_size())

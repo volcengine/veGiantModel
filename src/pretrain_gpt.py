@@ -15,7 +15,9 @@
 
 """Pretrain GPT"""
 
+import os
 import subprocess
+import sys
 from functools import partial
 
 import deepspeed
@@ -23,15 +25,20 @@ import torch
 from deepspeed.runtime.utils import see_memory_usage
 
 from veGiantModel import add_ve_giant_model_customize_args
-from veGiantModel.megatron import (get_args, get_timers, get_tokenizer, mpu,
-                                   print_rank_0)
-from veGiantModel.megatron.data.gpt_dataset import \
-    build_train_valid_test_datasets
-from veGiantModel.megatron.model import GPTModel, GPTModelPipe
-from veGiantModel.megatron.training import pretrain
-from veGiantModel.megatron.utils import (
-    average_losses_across_data_parallel_group, get_ltor_masks_and_position_ids)
 from veGiantModel.model.gpt_piped import GPTModelPipe as veGPTModelPipe
+from veGiantModel.training import pretrain
+
+curr_path = os.path.abspath(os.path.dirname(__file__))
+sys.path.append(os.path.join(curr_path, "../../3rdparty/Megatron-DeepSpeed"))
+
+try:
+    from megatron import get_args, get_timers, get_tokenizer, mpu, print_rank_0
+    from megatron.data.gpt_dataset import build_train_valid_test_datasets
+    from megatron.model import GPTModel, GPTModelPipe
+    from megatron.utils import (average_losses_across_data_parallel_group,
+                                get_ltor_masks_and_position_ids)
+except ImportError:
+    raise ImportError("Please use `` to clone the 3rd party library")
 
 
 def model_provider(pre_process=True, post_process=True):

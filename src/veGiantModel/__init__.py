@@ -1,6 +1,11 @@
 # Copyright (c) 2021, ByteDance Inc.  All rights reserved.
 
-from .engine.engine import veGiantModelEngine
+import os
+import sys
+from veGiantModel.engine.engine import veGiantModelEngine
+
+curr_path = os.path.abspath(os.path.dirname(__file__))
+sys.path.append(os.path.join(curr_path, "../../3rdparty/Megatron-DeepSpeed/"))
 
 
 def add_ve_giant_model_customize_args(parser):
