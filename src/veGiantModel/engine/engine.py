@@ -1,52 +1,44 @@
 # Copyright (c) 2021, ByteDance Inc.  All rights reserved.
 # Copyright 2019 The Microsoft DeepSpeed Team
+import logging
 import os
-
 from types import MethodType
 
 import torch
-
 import torch.distributed as dist
-
+from deepspeed.runtime.dataloader import RepeatingLoader
+from deepspeed.runtime.engine import MEMORY_OPT_ALLREDUCE_SIZE
+from deepspeed.runtime.pipe.engine import PipelineEngine
+from deepspeed.runtime.pipe.module import PipelineError, PipelineModule
+from deepspeed.utils import log_dist
 from deepspeed.utils.logging import logger
 from deepspeed.utils.timer import ThroughputTimer
+from deepspeed.runtime.utils import PartitionedTensor
 
-from deepspeed.runtime.engine import MEMORY_OPT_ALLREDUCE_SIZE
-from deepspeed.runtime.dataloader import RepeatingLoader
+from . import p2p, schedule
 
-from deepspeed.runtime.pipe.module import PipelineModule, PipelineError
-from deepspeed.runtime.pipe.engine import PipelineEngine
-from . import p2p
-from . import schedule
 try:
     import byteps.torch as bps
 except ImportError:
     print("byteps is not installed. Pipeline parallelism is disabled")
     bps = None
 
-from .module import VeGiantModule
-from deepspeed.utils import log_dist
-import logging
-from torch._six import inf
-
-# from inspect import signature
 
 LOG_STAGE = -2
 DATA_PARALLEL_ID = -2
 
-try:
-    from apex import amp
-except ImportError:
-    # Fail silently so we don't spam logs unnecessarily if user isn't using amp
-    pass
+# try:
+#     from apex import amp
+# except ImportError:
+#     # Fail silently so we don't spam logs unnecessarily if user isn't using amp
+#     pass
 
 
 def is_even(number):
     return number % 2 == 0
 
+
 ENABLE_PYTORCH_BROADCAST = os.environ.get("ENABLE_PYTORCH_BROADCAST", "0") != "0"
-
-
 
 DS_PIPE_VERBOSE = int(os.environ.get('DS_PIPE_VERBOSE', "0"))
 MEGATRON_DEBUG_DATA = os.environ.get('MEGATRON_DEBUG_DATA', "0") != "0"
@@ -56,6 +48,7 @@ ENABLE_BPS_PARTITION = os.environ.get("ENABLE_BPS_PARTITION", "0") != "0"
 
 def _tensor_bytes(tensor):
     return tensor.numel() * tensor.element_size()
+
 
 def _dtype_to_code(dtype):
     if dtype == torch.half:
@@ -73,6 +66,7 @@ def _dtype_to_code(dtype):
     else:
         raise AssertionError("not recognized tensor type for pipeline send")
 
+
 def _code_to_dtype(code):
     if code == 0:
         return torch.half
@@ -89,232 +83,80 @@ def _code_to_dtype(code):
     else:
         raise AssertionError("not recognized tensor type code for pipeline recv")
 
-class VeGiantModelEngine(PipelineEngine):
+
+class veGiantModelEngine(PipelineEngine):
     """ A training engine hybrid pipeline, data, and model parallel training.
 
     This engine is created by ``deepspeed.initialize()`` when a :class:`PipelineModule`
     is provided.
     """
-    def overwrite(self, config_params, args):
-        if args.batch_size is not None:
-            log_dist(f'overwrite dsconfig train_micro_batch_size_per_gpu to {args.batch_size}', \
-                ranks=[-1], level=logging.DEBUG)
-            config_params['train_micro_batch_size_per_gpu'] = args.batch_size
-        
-        if args.gradient_accumulation_steps is not None:
-            log_dist(f'overwrite dsconfig gradient_accumulation_steps to {args.gradient_accumulation_steps}', \
-                ranks=[-1], level=logging.DEBUG)
-            config_params['gradient_accumulation_steps'] = args.gradient_accumulation_steps
 
-        if args.train_batch_size is not None:
-            log_dist(f'overwrite dsconfig train_batch_size to {args.train_batch_size}, ', \
-                ranks=[-1], level=logging.DEBUG)
-            config_params['train_batch_size'] = args.train_batch_size
+    def __init__(self,
+                 args,
+                 model,
+                 optimizer,
+                 model_parameters,
+                 training_data,
+                 lr_scheduler,
+                 mpu,
+                 dist_init_required,
+                 collate_fn,
+                 config_params):
 
-        if args.log_interval is not None:
-            config_params['steps_per_print'] = args.log_interval
-
-    def __init__(self, args,
-                    model,
-                    optimizer,
-                    model_parameters,
-                    training_data,
-                    lr_scheduler,
-                    mpu,
-                    dist_init_required,
-                    collate_fn,
-                    config_params):
-        
-        self.overwrite(config_params, args)
-        super(PipelineEngine, self).__init__(args,
-                    model,
-                    optimizer,
-                    model_parameters,
-                    training_data,
-                    lr_scheduler,
-                    mpu,
-                    dist_init_required,
-                    collate_fn,
-                    config_params)
+        super(veGiantModelEngine, self).__init__(args=args,
+                                                 model=model,
+                                                 optimizer=optimizer,
+                                                 model_parameters=model_parameters,
+                                                 training_data=training_data,
+                                                 lr_scheduler=lr_scheduler,
+                                                 mpu=mpu,
+                                                 dist_init_required=dist_init_required,
+                                                 collate_fn=collate_fn,
+                                                 config_params=config_params)
         assert isinstance(self.module, PipelineModule), "model must base PipelineModule"
 
         # pipeline step for logging
         self.args = args
-        self.log_batch_step_id = -1
-        self.train_mode = True
 
-        self.enable_backward_allreduce = False
-        self.micro_batch_size = self.train_micro_batch_size_per_gpu()
-        self.micro_batches = self.gradient_accumulation_steps()
         self.first_train = True
         self.first_eval = True
 
-        # Set Grid and Communication Groups
-        self.grid = self.module._grid
-        if self.grid.get_global_rank() == 0:
-            logger.info(f'CONFIG: micro_batches={self.micro_batches} '
-                        f'micro_batch_size={self.micro_batch_size}')
-
-        self.global_rank = self.grid.get_global_rank()
-
-        assert self.dp_world_size == self.grid.data_parallel_size
-        assert self.train_batch_size() == \
-            self.micro_batch_size * self.micro_batches * self.grid.data_parallel_size
-
         #  Set Stage Inf
-        self.num_stages = self.grid.pipe_parallel_size
-        self.stage_id = self.grid.get_stage_id()
         self.mp_id = self.grid.get_model_parallel_id()
-        self.prev_stage = self.stage_id - 1
-        self.next_stage = self.stage_id + 1
-
-        self.data_iterator = None
-        self.batch_fn = None
-        self.result_dict = {}
-
-        self._force_grad_boundary = False
-
-        self.batch_timer = ThroughputTimer(batch_size=self.micro_batch_size *
-                                           self.micro_batches,
-                                           num_workers=self.dp_world_size,
-                                           logging_fn=self.tput_log,
-                                           monitor_memory=False,
-                                           steps_per_output=self.steps_per_print())
-
-        # PipelineEngine needs to handle data loading specially due to only the first
-        # and last stages loading inputs/labels. We construct a sampler that uses
-        if self.training_data:
-            self._build_data_iter(self.training_data)
-
-        self.is_pipe_parallel = self.grid.pipe_parallel_size > 1
-        self.is_data_parallel = self.grid.data_parallel_size > 1
-        self.is_model_parallel = self.grid.model_parallel_size > 1
 
         # Partition input/output buffers
         self.is_pipe_partitioned = False if self.args.broadcast_activation else (self.is_model_parallel and ENABLE_PYTORCH_BROADCAST)
         self.is_grad_partitioned = False
 
-        model_parameters = filter(lambda p: p.requires_grad, self.module.parameters())
-        num_params = sum([p.numel() for p in model_parameters])
-        unique_params = num_params
-        # Subtract tied parameters if we don't own them
-        if self.module.tied_comms:
-            tied_params = 0
-            for key, d in self.module.tied_comms.items():
-                if self.global_rank != min(d['ranks']):
-                    tied_params += sum(p.numel() for p in d['module'].parameters())
-            unique_params -= tied_params
-        params_tensor = torch.LongTensor(data=[num_params,
-                                               unique_params]).to(self.device)
-        print(f'Calculating param sizes ... ', flush=True)
-
-
-        dist.all_reduce(params_tensor, group=self.grid.get_model_parallel_group())
-        params_tensor = params_tensor.tolist()
-        total_params = params_tensor[0]
-        unique_params = params_tensor[1]
-        if self.grid.data_parallel_id == 0:
-            logger.info(f'RANK={self.global_rank} '
-                        f'STAGE={self.stage_id} '
-                        f'LAYERS={self.module._local_stop - self.module._local_start} '
-                        f'[{self.module._local_start}, {self.module._local_stop}) '
-                        f'STAGE_PARAMS={num_params} ({num_params/1e6:0.3f}M) '
-                        f'TOTAL_PARAMS={total_params} ({total_params/1e6:0.3f}M) '
-                        f'UNIQUE_PARAMS={unique_params} ({unique_params/1e6:0.3f}M)')
-
-        print(f'DONE calculating param sizes. Now init proc groups', flush=True)
-
-        #intialize peer-2-peer communication and allreduce groups
+        # # intialize peer-2-peer communication and allreduce groups
         if self.is_pipe_parallel:
             p2p.init_process_groups(self.grid)
 
         # Pipeline buffers
         self.num_pipe_buffers = 0
         self.pipe_buffers = {
-            'inputs' : [],   # batch input and received activations
-            'labels' : [],   # labels from batch input
-            'outputs' : [],  # activations
-            'output_tensors' : [], # tensor object to preserve backward graph
-            'bps_act_recv' : [],  # activations recv
-            'bps_grad_recv' : [],  # activations recv
+            'inputs': [],   # batch input and received activations
+            'labels': [],   # labels from batch input
+            'outputs': [],  # activations
+            'output_tensors': [],  # tensor object to preserve backward graph
+            'bps_act_recv': [],  # activations recv
+            'bps_grad_recv': [],  # activations recv
         }
-        self.pipe_recv_buf = None
-        self.grad_layer = None
-
-        self.meta_buffer = None
-
-        self.first_output_send = True
-        self.first_gradient_send = True
-
-        #stores the loss for the current micro batch being processed
-        self.loss = torch.tensor(0.0).to(self.device)
-        self.metric = 0
-
-        #stores the loss for the entire batch
-        self.total_loss = None
-        self.agg_loss = torch.tensor(0.0, requires_grad=False).to(self.device)
-        self.dp_group_loss = torch.tensor(0.0, requires_grad=False).to(self.device)
-
-        if self._config.pipeline['activation_checkpoint_interval'] > 0:
-            self.module.activation_checkpoint_interval = self._config.pipeline[
-                'activation_checkpoint_interval']
-
-        if self.is_last_stage():
-            self.loss_model = self.module.loss_fn
-
-        log_dist(f'Initialize pipeline communicators', \
-            ranks=[-1], level=logging.DEBUG)
-
-        # Initialize pipeline communicators. Just send a 0.
-        if is_even(self.stage_id):
-            if not self.is_last_stage():
-                p2p.send(self.loss, self.next_stage)
-            if not self.is_first_stage():
-                p2p.recv(self.loss, self.prev_stage)
-        else:
-            if not self.is_first_stage():
-                p2p.recv(self.loss, self.prev_stage)
-            if not self.is_last_stage():
-                p2p.send(self.loss, self.next_stage)
-        
-        log_dist(f'DONE Initialize pipeline communicators', \
-            ranks=[-1], level=logging.DEBUG)
-
-        # XXX look into timer reporting timing
-        # Initialize some timers because of early weirdness.
-        if self.wall_clock_breakdown():
-            self.timers('forward_microstep').start()
-            self.timers('forward_microstep').stop()
-            self.timers('backward_microstep').start()
-            self.timers('backward_microstep').stop()
-            self.timers('backward_inner_microstep').start()
-            self.timers('backward_inner_microstep').stop()
-            self.timers('backward_allreduce_microstep').start()
-            self.timers('backward_allreduce_microstep').stop()
-            self.timers('backward_allreduce').start()
-            self.timers('backward_allreduce').stop()
-            self.timers('step_microstep').start()
-            self.timers('step_microstep').stop()
-
-        if self.local_rank == -1:
-            # or number of visiable device will be better
-            self.local_rank = self.global_rank % torch.cuda.device_count()
 
         if not p2p.ENABLE_PYTORCH_BROADCAST:
-            gpu_per_node = int(os.environ['GPU_PER_WORKER'])
+            gpu_per_node = int(os.environ['BYTEPS_LOCAL_SIZE'])
             print(f'bps init worker: {gpu_per_node}, {self.local_rank}/{self.global_rank}', flush=True)
             os.environ['BYTEPS_LOCAL_RANK'] = str(self.local_rank)
-            os.environ['BYTEPS_LOCAL_SIZE'] = str(gpu_per_node)
+            # os.environ['BYTEPS_LOCAL_SIZE'] = str(gpu_per_node)
             os.environ['BYTEPS_VISIBLE_DEVICE'] = str(self.local_rank)
             os.environ['DMLC_ROLE'] = 'joint'
             os.environ['DMLC_WORKER_ID'] = str(self.global_rank)
             bps.init(lazy=False)
-            print(f'bps init DONE', flush=True)
-
+            print(f'bps init DONE {self.local_rank}/{self.global_rank}', flush=True)
 
     def _profiling_func_exit(self):
         torch.cuda.nvtx.range_pop()
-    
+
     def _profiling_func_enter(self, func):
         torch.cuda.nvtx.range_push(f'stage_id: {self.stage_id}, mp_id: {self.mp_id}, fun: {func}')
 
@@ -345,7 +187,6 @@ class VeGiantModelEngine(PipelineEngine):
                 elements_per_buffer=MEMORY_OPT_ALLREDUCE_SIZE)
         self._force_grad_boundary = False
         self._profiling_func_exit()
-
 
     def _reserve_pipe_buffers(self, num_buffers):
         """Ensure that each pipeline buffer has at least ``num_buffers`` slots.
@@ -390,29 +231,35 @@ class VeGiantModelEngine(PipelineEngine):
 
         if DS_PIPE_VERBOSE:
             print(f'[{self.global_rank}] start train_batch()', flush=True)
-        if not torch._C.is_grad_enabled():
-            raise RuntimeError(
-                f'train_batch() requires gradients enabled. Use eval_batch() instead.')
+        # Curriculum learning could change activation shape
+        if self.curriculum_enabled():
+            new_difficulty = self.curriculum_scheduler.update_difficulty(self.global_steps + 1)
+            if self.global_steps == 0 or self.curriculum_scheduler.first_step:
+                self.reset_activation_shape()
+                self.curriculum_scheduler.first_step = False
+            elif new_difficulty != self.curriculum_scheduler.get_difficulty(self.global_steps):
+                self.reset_activation_shape()
 
-        if data_iter is not None:
+        if data_iter:
             self.set_dataiterator(data_iter)
 
         self.module.train()
-        self.train()
         self.total_loss = None
+        self._compute_loss = True
 
         # Do the work
         self.timers('train_batch').start()
         # We only enable prefetching starting from the second batch
         if not ENABLE_PYTORCH_BROADCAST:
             sched = schedule.BytePSTrainSchedule(micro_batches=self.micro_batches,
-                                                stages=self.num_stages,
-                                                stage_id=self.stage_id, prefetch=not self.first_train)
+                                                 stages=self.num_stages,
+                                                 stage_id=self.stage_id,
+                                                 prefetch=not self.first_train)
         else:
             sched = schedule.TrainSchedule(micro_batches=self.micro_batches,
-                                       stages=self.num_stages,
-                                       stage_id=self.stage_id)
-        cmd = ','.join(str(x) for x in sched)
+                                           stages=self.num_stages,
+                                           stage_id=self.stage_id)
+        # cmd = ','.join(str(x) for x in sched)
         # log_dist(f'stage_id: {self.stage_id}, sched:{cmd}', ranks=[-1], level=logging.INFO)
         self._exec_schedule(sched)
         self.agg_train_loss = self._aggregate_total_loss()
@@ -420,7 +267,7 @@ class VeGiantModelEngine(PipelineEngine):
 
         if self.global_steps % self.steps_per_print() == 0:
             if self.global_rank == 0:
-                elapsed = self.timers('train_batch').elapsed(reset=True)
+                elapsed = self.timers('train_batch').elapsed(reset=True) / 1000.0
                 iter_time = elapsed / self.steps_per_print()
                 tput = self.train_batch_size() / iter_time
                 print(f'steps: {self.global_steps} '
@@ -452,9 +299,9 @@ class VeGiantModelEngine(PipelineEngine):
         self.first_train = False
         if DS_PIPE_VERBOSE:
             print(f'[{self.global_rank}] DONE train_batch()', flush=True)
-        
-        self.result_dict['loss'] = self.agg_train_loss
-        return self.result_dict
+
+        # self.result_dict['loss'] = self.agg_train_loss
+        return self.agg_train_loss
 
     def eval_batch(self, data_iter):
         """Evaluate the pipeline on a batch of data from ``data_iter``. The
@@ -496,12 +343,13 @@ class VeGiantModelEngine(PipelineEngine):
         self.timers('eval_batch').start()
         if not ENABLE_PYTORCH_BROADCAST:
             sched = schedule.BytePSInferenceSchedule(micro_batches=1,
-                                           stages=self.num_stages,
-                                           stage_id=self.stage_id, prefetch=False)
+                                                     stages=self.num_stages,
+                                                     stage_id=self.stage_id,
+                                                     prefetch=False)
         else:
             sched = schedule.InferenceSchedule(micro_batches=self.micro_batches,
-                                           stages=self.num_stages,
-                                           stage_id=self.stage_id)
+                                               stages=self.num_stages,
+                                               stage_id=self.stage_id)
         with torch.no_grad():
             self._exec_schedule(sched)
 
@@ -530,10 +378,10 @@ class VeGiantModelEngine(PipelineEngine):
         self.set_dataiterator(train_iterator)
 
         # Reset any buffers that may have been populated during the forward passes.
-        #ds_checkpointing.reset()
+        # ds_checkpointing.reset()
         self.first_eval = False
-        self.result_dict['loss'] = self.agg_eval_loss
-        return self.result_dict
+        # self.result_dict['loss'] = self.agg_eval_loss
+        return self.agg_eval_loss
 
     def is_first_stage(self):
         """True if this process is in the first stage in the pipeline."""
@@ -574,12 +422,10 @@ class VeGiantModelEngine(PipelineEngine):
     def _aggregate_total_loss(self):
         # Scale loss, average among DP ranks, and bcast loss to the rest of my DP group
         if self.is_last_stage():
-            # XXX Hack: do not scale loss
-            loss = self._scale_loss(self.total_loss)
-
+            loss = self._scale_loss_by_gas(self.total_loss)
             self.dp_group_loss = loss.clone().detach()
 
-            ## Average loss across all data-parallel groups
+            # Average loss across all data-parallel groups
             agg_loss = self.dp_group_loss.clone().detach()
 
             if DS_PIPE_VERBOSE:
@@ -638,7 +484,6 @@ class VeGiantModelEngine(PipelineEngine):
         """
         return self._force_grad_boundary
 
-
     def tput_log(self, *msg):
         if self.global_rank == 0 and self.global_steps % self.steps_per_print() == 0:
             print(*msg)
@@ -659,7 +504,7 @@ class VeGiantModelEngine(PipelineEngine):
 
         # All MP ranks participate in batch_fn, where they might broadcast the data.
         if self.batch_fn:
-            batch = self.batch_fn(batch, self.train_mode)
+            batch = self.batch_fn(batch)
 
         # Sanity check dimensions.
         # XXX: the last minibatch with size < micro_batch_size kills us
@@ -673,7 +518,6 @@ class VeGiantModelEngine(PipelineEngine):
             if batch[0][0].size(0) != self.micro_batch_size:
                 print(f'HB next_batch: {batch[0][0].shape} vs {self.micro_batch_size}', flush=True)
                 return self._next_batch()
-        
         return batch
 
     def _exec_bps_forward_pass(self, buffer_id):
@@ -758,15 +602,7 @@ class VeGiantModelEngine(PipelineEngine):
         if isinstance(outputs, tuple):
             out_tensors = [t for t in outputs if t.is_floating_point()]
             assert len(out_tensors) == len(grad_tensors)
-            new_out_tensors=[]
-            new_grad_tensors=[]
-            for t,g in zip(out_tensors, grad_tensors):
-                if t.requires_grad:
-                    new_out_tensors.append(t)
-                    new_grad_tensors.append(g)
-
-            assert len(new_out_tensors) == len(new_grad_tensors)
-            torch.autograd.backward(tensors=new_out_tensors, grad_tensors=new_grad_tensors)
+            torch.autograd.backward(tensors=out_tensors, grad_tensors=grad_tensors)
         else:
             torch.autograd.backward(tensors=(outputs,), grad_tensors=(grad_tensors,))
 
@@ -1138,7 +974,7 @@ class VeGiantModelEngine(PipelineEngine):
         # all_gather the gradient from other ranks
         mp_size = self.grid.model_parallel_size
         if mp_size > 1:
-            src_rank = self.grid.slice_parallel_src_id
+            # src_rank = self.grid.slice_parallel_src_id
             group = self.grid.slice_proc_group
             if isinstance(recv_buff, torch.Tensor):
                 recv_buff_views = [self._mp_view(recv_buff, i) for i in range(mp_size)]
@@ -1165,7 +1001,7 @@ class VeGiantModelEngine(PipelineEngine):
         if self.grid.model_parallel_size > 1:
             src_rank = self.grid.slice_parallel_src_id
             group = self.grid.slice_proc_group
-            if isinstance(recv_buff, torch.Tensor):        
+            if isinstance(recv_buff, torch.Tensor):
                 dist.broadcast(recv_buff, src_rank, group=group, async_op=False)
             else:
                 for i in range(len(recv_buff)):
@@ -1175,7 +1011,7 @@ class VeGiantModelEngine(PipelineEngine):
     def _exec_bps_sync_partitioned_activations(self, buffer_id):
         recv_buff = self.pipe_buffers['bps_act_recv'][buffer_id]
         recvd = None
-        src_rank = self.grid.slice_parallel_src_id
+        # src_rank = self.grid.slice_parallel_src_id
         mp_size = self.grid.model_parallel_size
         group = self.grid.slice_proc_group
         name = f'act_{buffer_id}'
@@ -1385,22 +1221,22 @@ class VeGiantModelEngine(PipelineEngine):
         self.mem_status('BEFORE STEP', reset_max=True)
 
         if self.global_rank == 0 and MEGATRON_DEBUG_GRAD:
-             params = list(self.module.named_parameters())
-             for i in (0, 1, -2, -1):
-                 p = params[i]
-                 if p[1] is None:
-                     print(f'name={p[0]} | None', flush=True)
-                 elif p[1].grad is None:
-                     print(f'name={p[0]} | weight={p[1].mean()}', flush=True)
-                 else:
-                     print(f'name={p[0]} | weight={p[1].norm()} | grad={p[1].grad.norm()}', flush=True)
-             params_w_grad = []
-             params_wo_grad = []
-             for p in params:
-                 if p[1].grad is not None:
-                     params_w_grad.append(p[0])
-                 else:
-                     params_wo_grad.append(p[0])
+            params = list(self.module.named_parameters())
+            for i in (0, 1, -2, -1):
+                p = params[i]
+                if p[1] is None:
+                    print(f'name={p[0]} | None', flush=True)
+                elif p[1].grad is None:
+                    print(f'name={p[0]} | weight={p[1].mean()}', flush=True)
+                else:
+                    print(f'name={p[0]} | weight={p[1].norm()} | grad={p[1].grad.norm()}', flush=True)
+            params_w_grad = []
+            params_wo_grad = []
+            for p in params:
+                if p[1].grad is not None:
+                    params_w_grad.append(p[0])
+                else:
+                    params_wo_grad.append(p[0])
 
         self._force_grad_boundary = True
         self._take_model_step(lr_kwargs)

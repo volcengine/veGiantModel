@@ -1,15 +1,13 @@
 # Copyright (c) 2021, ByteDance Inc.  All rights reserved.
 # Copyright 2019 The Microsoft DeepSpeed Team
 
-from deepspeed.utils import log_dist
-
-import torch.distributed as dist
-
+import logging
 from collections import namedtuple
 from itertools import product as cartesian_product
-import logging, os
 
-import torch
+import torch.distributed as dist
+from deepspeed.utils import log_dist
+
 
 class ProcessTopology:
     """ Manages the mapping of n-dimensional Cartesian coordinates to linear
@@ -60,7 +58,7 @@ class ProcessTopology:
             raise ValueError('get_rank() does not support slices. Use filter_match())')
 
         key = self.ProcessCoord(**coord_kwargs)
-        assert key in self.mapping, f'key {kwargs} invalid'
+        assert key in self.mapping, f'key {key} invalid'
         return self.mapping[key]
 
     def get_axis_names(self):
@@ -303,13 +301,12 @@ class PipelineParallelGrid:
         # Create new ProcessGroups for all model parallelism. DeepSpeedLight uses these
         # to detect overflow, etc.
 
-
         self.ds_model_proc_group = None
         self.ds_model_rank = -1
         for dp in range(self.data_parallel_size):
             ranks = sorted(self._topo.get_axis_list(axis='data', idx=dp))
             if self.global_rank == 0:
-                #print(f'RANK={self.global_rank} building DeepSpeed model group: {ranks}')
+                # print(f'RANK={self.global_rank} building DeepSpeed model group: {ranks}')
                 pass
             proc_group = dist.new_group(ranks=ranks)
 
@@ -354,13 +351,13 @@ class PipelineParallelGrid:
             #     pass
             proc_group = dist.new_group(ranks=ranks)
             if self.global_rank in ranks:
-                log_dist(f'data_parallel_id: {self.data_parallel_id}, model_parallel_id: {self.model_parallel_id},\
-                    stage_id: {self.stage_id}, building pipeline group: {ranks}', \
-                    ranks=[-1], level=logging.DEBUG)
+                log_dist(f'data_parallel_id: {self.data_parallel_id}, model_parallel_id: {self.model_parallel_id}, '
+                         f'stage_id: {self.stage_id}, building pipeline group: {ranks}',
+                         ranks=[-1], level=logging.DEBUG)
                 self.pp_group = ranks
                 self.pp_proc_group = proc_group
         assert self.pp_proc_group is not None
-        
+
         # Create new ProcessGroup for model (tensor-slicing) collectives
 
         # Short circuit case without model parallelism.
@@ -426,7 +423,7 @@ class PipelineParallelGrid:
             {self.model_parallel_id}, stage_id: {self.stage_id}, \
             p2p_lists: {p2p_lists}', ranks=[-1], level=logging.DEBUG)
         return p2p_lists
-    
+
     def _build_grads_groups(self):
         self.send_grads_src_rank = -1
         self.recv_grads_src_rank = -1
@@ -440,12 +437,12 @@ class PipelineParallelGrid:
 
         for dp_id in range(self.data_parallel_size):
             for stage in range(self.pipe_parallel_size):
-                next_stage = stage + 1
+                # next_stage = stage + 1
                 prev_stage = stage - 1
 
                 grads_group = []
                 grads_proc_group = None
-            
+
                 if prev_stage > -1:
                     grads_src_rank = self._topo.filter_match(data=dp_id, pipe=stage, model=0)[0]
                     prev_mp_group = self._topo.filter_match(data=dp_id, pipe=prev_stage)
@@ -459,14 +456,14 @@ class PipelineParallelGrid:
                         self.send_grads_src_rank = grads_src_rank
                         self.send_grads_group = grads_group
                         self.send_grads_proc_group = grads_proc_group
-                    
+
                     elif stage == self.stage_id + 1 and self.data_parallel_id == dp_id:
                         self.recv_grads_src_rank = grads_src_rank
                         self.recv_grads_group = grads_group
                         self.recv_grads_proc_group = grads_proc_group
         log_dist(f'_build_grads_groups stage: {self.stage_id}, send_grads_src_rank : {self.send_grads_src_rank}, '
-                f'send_grads_group: {self.send_grads_group}, recv_grads_group: {self.recv_grads_group}', \
-                ranks=[-1], level=logging.DEBUG)
+                 f'send_grads_group: {self.send_grads_group}, recv_grads_group: {self.recv_grads_group}',
+                 ranks=[-1], level=logging.DEBUG)
 
     def _build_activation_groups(self):
         self.send_activation_src_rank = -1
@@ -482,11 +479,11 @@ class PipelineParallelGrid:
         for dp_id in range(self.data_parallel_size):
             for stage in range(self.pipe_parallel_size):
                 next_stage = stage + 1
-                prev_stage = stage - 1
+                # prev_stage = stage - 1
 
                 activation_group = []
                 activation_proc_group = None
-            
+
                 if next_stage < self.pipe_parallel_size:
                     activation_src_rank = self._topo.filter_match(data=dp_id, pipe=stage, model=0)[0]
                     next_mp_group = self._topo.filter_match(data=dp_id, pipe=next_stage)
@@ -503,9 +500,9 @@ class PipelineParallelGrid:
                         self.recv_activation_src_rank = activation_src_rank
                         self.recv_activation_group = activation_group
                         self.recv_activation_proc_group = activation_proc_group
-        log_dist(f'_build_activation_groups stage: {self.stage_id}, send_activation_src_rank : '\
-            f'{self.send_activation_src_rank}, send_activation_group: {self.send_activation_group}, '\
-            f'recv_grads_group: {self.recv_grads_group}', ranks=[-1], level=logging.DEBUG)
+        log_dist(f'_build_activation_groups stage: {self.stage_id}, send_activation_src_rank : '
+                 f'{self.send_activation_src_rank}, send_activation_group: {self.send_activation_group}, '
+                 f'recv_grads_group: {self.recv_grads_group}', ranks=[-1], level=logging.DEBUG)
 
     def _is_grid_valid(self):
         ranks = 1
@@ -513,14 +510,14 @@ class PipelineParallelGrid:
             ranks *= self._topo.get_dim(ax)
         return ranks == dist.get_world_size()
 
-    #returns the global rank of the process with the provided stage id
-    #which has the same data_parallel_id as caller process
+    # returns the global rank of the process with the provided stage id
+    # which has the same data_parallel_id as caller process
     def stage_to_global(self, stage_id, **kwargs):
         me = self._topo.get_coord(self.global_rank)
         transform = me._replace(pipe=stage_id, **kwargs)._asdict()
         return self._topo.get_rank(**transform)
 
-    #returns the byteps rank of the process with the provided stage id
+    # returns the byteps rank of the process with the provided stage id
     def stage_to_byteps(self, stage_id):
         return self.pipe_parallel_size * self.data_parallel_id + stage_id
 

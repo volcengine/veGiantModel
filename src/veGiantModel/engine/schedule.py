@@ -1,13 +1,14 @@
 # Copyright (c) 2021, ByteDance Inc.  All rights reserved.
-from deepspeed.runtime.pipe.schedule import (
-    BufferOpInstruction,PipeInstruction,
-    ReduceTiedGrads,ReduceGrads,OptimizerStep,
-    LoadMicroBatch,PipeSchedule,TrainSchedule,
-)
-
 import os
 
+from deepspeed.runtime.pipe.schedule import (BufferOpInstruction,
+                                             LoadMicroBatch, OptimizerStep,
+                                             PipeInstruction, PipeSchedule,
+                                             ReduceGrads, ReduceTiedGrads,
+                                             TrainSchedule)
+
 BYTEPS_REDUCED_MEM = os.environ.get('BYTEPS_REDUCED_MEM', '1') != '0'
+
 
 class BytePSInferenceSchedule(PipeSchedule):
     """A schedule for inferencing batches using pipeline parallelism.
@@ -26,7 +27,7 @@ class BytePSInferenceSchedule(PipeSchedule):
             buffer_id = micro_batch_id % self.num_pipe_buffers()
             batch_is_valid = self._valid_micro_batch(micro_batch_id)
 
-            if not self.prefetch:    
+            if not self.prefetch:
                 if batch_is_valid:
                     if self.is_first_stage or self.is_last_stage:
                         cmds.append(LoadMicroBatch(buffer_id))
@@ -240,33 +241,34 @@ class BytePSTrainSchedule(TrainSchedule):
 class BytePSSendActivation(BufferOpInstruction):
     pass
 
+
 class BytePSRecvActivation(BufferOpInstruction):
     pass
+
 
 class BytePSSyncActivation(BufferOpInstruction):
     pass
 
+
 class BytePSSyncGrad(BufferOpInstruction):
     pass
+
 
 class BytePSSendGrad(BufferOpInstruction):
     pass
 
+
 class BytePSRecvGrad(BufferOpInstruction):
     pass
+
 
 class BytePSForwardPass(BufferOpInstruction):
     pass
 
+
 class BytePSBackwardPass(BufferOpInstruction):
     pass
 
+
 class BytePSSyncAll(PipeInstruction):
     pass
-
-
-
-
-
-
-
