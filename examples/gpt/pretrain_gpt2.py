@@ -1,6 +1,6 @@
+# Copyright (c) 2021, ByteDance Inc.  All rights reserved.
+# Copyright (c) 2020, NVIDIA CORPORATION.  All rights reserved.
 """Pretrain GPT2"""
-
-
 import torch
 import os
 import numpy as np

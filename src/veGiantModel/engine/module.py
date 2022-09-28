@@ -1,4 +1,5 @@
 # Copyright (c) 2021, ByteDance Inc.  All rights reserved.
+# Copyright 2019 The Microsoft DeepSpeed Team
 import os
 
 import re as regex
