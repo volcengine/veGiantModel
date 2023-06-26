@@ -16,4 +16,4 @@ export MASTER_PORT=${MLP_WORKER_0_PORT:-1234}
 
 DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $NODE_RANK --master_addr $MASTER_ADDR --master_port $MASTER_PORT"
 
-python -m torch.distributed.launch $DISTRIBUTED_ARGS scripts/pretrain/train.py --config_file configs/llama65b.yaml
+python -m torch.distributed.launch $DISTRIBUTED_ARGS scripts/pretrain/train.py --config_file configs/llama13b.yaml

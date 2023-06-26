@@ -31,6 +31,11 @@ pip install -r requirements.txt
 ```bash
 volc ml_task submit --conf config.yaml
 ```
+在执行之前，建议检查一下配置：
+
+- 模型建议提前下载到共享存储中，虽然代码中支持从 Huggingface 直接下载模型，但是受限于网络等多种因素，很容易超时、链接失败等，请参考：https://huggingface.co/docs/hub/models-downloading 中的教程提前进行下载。完成下载后，修改 configs 文件夹中 `pretrained_model_name_or_path` 字段对应的值为模型的本地路径；
+- ...
+
 
 ### 预训练
 
