@@ -13,7 +13,7 @@ class ModelConfig(BaseModel):
     trust_remote_code: bool = True
     use_auth_token: bool = False
     pretrained: bool = False
-    init_device: str = "cpu"
+    init_device: str = "cpu"  # or meta
     enable_native_amp: bool = True
     enable_dynamo: bool = True
     enable_flash_attn: bool = False

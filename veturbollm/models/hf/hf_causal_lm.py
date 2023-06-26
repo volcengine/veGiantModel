@@ -66,7 +66,6 @@ class TurboHFCausalLM(TurboHFModelWithZLoss):
                 init_device = "cpu"
         else:
             init_device = "cpu"
-        init_device = "meta"
 
         if init_device == "cpu" and args.model.pretrained:
             if args.model.enable_flash_attn:
@@ -86,8 +85,6 @@ class TurboHFCausalLM(TurboHFModelWithZLoss):
                     config=config,
                 )
         else:
-            from veturbollm.utils.meta_init_context import init_empty_weights
-
             if args.model.enable_flash_attn:
                 if "gpt2" in args.model.pretrained_model_name_or_path:
                     # from flash_attn.models.gpt import GPTLMHeadModel
