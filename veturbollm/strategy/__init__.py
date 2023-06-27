@@ -56,11 +56,11 @@ def prepare_distributed_strategy(model):
             )
         model.forward = fp8_autocast(enabled=fp8_enabled, fp8_recipe=fp8_recipe)(model.forward)
 
-        # torch.compile should be called last.
-        if args.model.enable_dynamo:
-            if not hasattr(torch, "compile"):
-                raise ValueError("Using torch.compile requires PyTorch 2.0 or higher.")
-            model = torch.compile(model)
+    # torch.compile should be called last.
+    if args.model.enable_dynamo:
+        if not hasattr(torch, "compile"):
+            raise ValueError("Using torch.compile requires PyTorch 2.0 or higher.")
+        model = torch.compile(model)
     model.model.device = torch.device("cuda")
     model.device = torch.device("cuda")
     return model, optimizer, lr_scheduler
