@@ -85,9 +85,9 @@ class TurboHFCausalLM(TurboHFModelWithZLoss):
                     config=config,
                 )
         else:
+            init_device = "meta"
             if args.model.enable_flash_attn:
                 if "gpt2" in args.model.pretrained_model_name_or_path:
-                    # from flash_attn.models.gpt import GPTLMHeadModel
                     from veturbollm.models.hf.gpt import GPTLMHeadModel
 
                     config.use_flash_attn = True

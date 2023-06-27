@@ -26,16 +26,17 @@ pip install -r requirements.txt
 
 
 ## 快速开始
-我们将在此提供一个快速开始的例子，以便您快速上手。请修改 [config.yaml](config.yaml) 中的配置，然后运行以下命令：
+我们将在此提供一个快速开始的例子，以便您快速上手。
+
+在开始之前，建议检查一下 `run_pretrain.sh` 中配置的模型配置，该配置通常存放在 `configs` 路径下：
+
+- 模型建议提前下载到共享存储中，虽然代码中支持从 Huggingface 直接下载模型，但是受限于网络等多种因素，很容易超时、链接失败等，请参考：https://huggingface.co/docs/hub/models-downloading 中的教程提前进行下载。完成下载后，修改 configs 文件夹中 `pretrained_model_name_or_path` 字段对应的值为模型的本地路径；
+
+接着请修改 [config.yaml](config.yaml) 中的队列、机器数量的配置，然后运行以下命令提交任务：
 
 ```bash
 volc ml_task submit --conf config.yaml
 ```
-在执行之前，建议检查一下配置：
-
-- 模型建议提前下载到共享存储中，虽然代码中支持从 Huggingface 直接下载模型，但是受限于网络等多种因素，很容易超时、链接失败等，请参考：https://huggingface.co/docs/hub/models-downloading 中的教程提前进行下载。完成下载后，修改 configs 文件夹中 `pretrained_model_name_or_path` 字段对应的值为模型的本地路径；
-- ...
-
 
 ### 预训练
 
@@ -62,10 +63,11 @@ python scripts/sft_train/train.py --config_file configs/llama7b_sft.yaml
 我们在 llama 模型上进行了测试，以下是一些测试结果：
 
 
-| Model      | GPU Type  | Card Nums | TFLOPs | Throughput(tokens/gpu/s)    |
-| ---------- | --------- | --------- | ------ | --------------------------- |
-| llama-13b  | A100-80G  | 32        | 200.5  | 2486                        |
-| llama-13b  | A100-80G  | 64        | 201.6  | 2501                        |
+| Model      | GPU Type  | Card Nums | miniBS | GA | TFLOPs | Throughput(tokens/gpu/s)    |
+| ---------- | --------- | --------- | ------ | -- | ------ | --------------------------- |
+| llama-7b   | A100-80G  | 32        | 4      | 4  | 193.9  | 4609                        |
+| llama-13b  | A100-80G  | 32        | 4      | 4  | 200.5  | 2486                        |
+| llama-13b  | A100-80G  | 64        | 4      | 4  | 201.6  | 2501                        |
 
 
 ## 特性
