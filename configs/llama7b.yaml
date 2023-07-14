@@ -1,15 +1,16 @@
 
 tokenizer:
-  pretrained_model_name_or_path: decapoda-research/llama-7b-hf
+  pretrained_model_name_or_path: ./huggingface/llama-7b-hf
   use_slow_tokenizer: True
 
 model:
-  pretrained_model_name_or_path: decapoda-research/llama-7b-hf
+  pretrained_model_name_or_path: ./huggingface/llama-7b-hf
   distributed_mode: fsdp
   trust_remote_code: False
   pretrained: False
   init_device: cpu
   enable_flash_attn: True
+  enable_dynamo: False
 
 distributed:
   strategy: fsdp
@@ -17,7 +18,7 @@ distributed:
   pipeline_model_parallel_size: 1
 
 dataset:
-  dataset_name: wikitext
+  dataset_name: ./huggingface/wikitext
   dataset_config_name: wikitext-2-raw-v1
   block_size: 1024
 
@@ -35,7 +36,7 @@ learning_rate:
 training:
   micro_batch_size: 4
   global_batch_size: null
-  gradient_accumulation_steps: 4
+  gradient_accumulation_steps: 2
   rampup_batch_size: null
   train_iters: 10000
   train_epochs: null
