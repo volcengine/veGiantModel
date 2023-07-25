@@ -1,11 +1,9 @@
 transformers==4.29.1
-accelerate
 datasets
-deepspeed
 omegaconf
 torchmetrics
 sentencepiece
 pydantic
 protobuf==3.20
-https://veturbo-cn-beijing.tos-cn-beijing.ivolces.com/veturbo%2F0.1.0%2Fveturbo-llm%2Fveturbo-0.1.0-py3-none-any.whl
+https://veturbo-cn-beijing.tos-cn-beijing.ivolces.com/veturbo/veturbo-0.1.0+e5d8df7-py3-none-any.whl
 https://veturbo-cn-beijing.tos-cn-beijing.ivolces.com/veturbo%2F0.1.0%2Fveturbo-llm%2Fflash_attn-1.0.7-cp310-cp310-linux_x86_64.whl
