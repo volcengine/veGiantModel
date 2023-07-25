@@ -5,7 +5,6 @@ from functools import partial
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 from einops import rearrange
 from veturbollm.modules.rotary import RotaryEmbedding
@@ -16,21 +15,11 @@ try:
 except ImportError:
     flash_attn_unpadded_qkvpacked_func, flash_attn_unpadded_kvpacked_func = None, None
 
-try:
-    from flash_attn.ops.flash_attn_triton import flash_attn_qkvpacked_func, flash_attn_kvpacked_func
-except ImportError:
-    flash_attn_qkvpacked_func, flash_attn_kvpacked_func = None, None
 
 try:
-    from flash_attn.ops.fused_dense import FusedDense, ColumnParallelLinear, RowParallelLinear
+    from flash_attn.ops.fused_dense import FusedDense
 except ImportError:
-    FusedDense, ColumnParallelLinear, RowParallelLinear = None, None, None
-
-
-try:
-    import ft_attention
-except ImportError:
-    ft_attention = None
+    FusedDense = None
 
 
 class FlashSelfAttention(nn.Module):
@@ -44,16 +33,14 @@ class FlashSelfAttention(nn.Module):
                            (default: 0.0)
     """
 
-    def __init__(self, causal=False, softmax_scale=None, attention_dropout=0.0, triton=False):
+    def __init__(self, causal=False, softmax_scale=None, attention_dropout=0.0):
         super().__init__()
-        if attention_dropout != 0.0 or not triton:
+        if attention_dropout != 0.0:
             assert flash_attn_unpadded_qkvpacked_func is not None, "FlashAttention is not installed"
-        if attention_dropout == 0.0 and triton:
-            assert flash_attn_qkvpacked_func is not None, "FlashAttention Triton is not installed"
+
         self.causal = causal
         self.softmax_scale = softmax_scale
         self.drop = nn.Dropout(attention_dropout)
-        self.triton = triton
 
     def forward(self, qkv, causal=None, cu_seqlens=None, max_seqlen=None):
         """Implements the multihead softmax attention.
@@ -91,23 +78,19 @@ class FlashSelfAttention(nn.Module):
         else:
             batch_size, seqlen = qkv.shape[0], qkv.shape[1]
             # Triton version doesn't support dropout
-            if self.triton and (self.drop.p == 0 or not self.training):
-                output = flash_attn_qkvpacked_func(qkv, None, causal, self.softmax_scale)
-            else:
-                qkv = rearrange(qkv, "b s ... -> (b s) ...")
-                max_seqlen = seqlen
-                cu_seqlens = torch.arange(
-                    0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32, device=qkv.device
-                )
-                output = flash_attn_unpadded_qkvpacked_func(
-                    qkv,
-                    cu_seqlens,
-                    max_seqlen,
-                    self.drop.p if self.training else 0.0,
-                    softmax_scale=self.softmax_scale,
-                    causal=causal,
-                )
-                output = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
+
+            qkv = rearrange(qkv, "b s ... -> (b s) ...")
+            max_seqlen = seqlen
+            cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32, device=qkv.device)
+            output = flash_attn_unpadded_qkvpacked_func(
+                qkv,
+                cu_seqlens,
+                max_seqlen,
+                self.drop.p if self.training else 0.0,
+                softmax_scale=self.softmax_scale,
+                causal=causal,
+            )
+            output = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
             return output
 
 
@@ -122,16 +105,13 @@ class FlashCrossAttention(nn.Module):
                            (default: 0.0)
     """
 
-    def __init__(self, causal=False, softmax_scale=None, attention_dropout=0.0, triton=False):
+    def __init__(self, causal=False, softmax_scale=None, attention_dropout=0.0):
         super().__init__()
-        if attention_dropout != 0.0 or not triton:
+        if attention_dropout != 0.0:
             assert flash_attn_unpadded_kvpacked_func is not None, "FlashAttention is not installed"
-        if attention_dropout == 0.0 and triton:
-            assert flash_attn_kvpacked_func is not None, "FlashAttention Triton is not installed"
         self.causal = causal
         self.softmax_scale = softmax_scale
         self.drop = nn.Dropout(attention_dropout)
-        self.triton = triton
 
     def forward(self, q, kv, causal=None, cu_seqlens=None, max_seqlen=None, cu_seqlens_k=None, max_seqlen_k=None):
         """Implements the multihead softmax attention.
@@ -174,29 +154,27 @@ class FlashCrossAttention(nn.Module):
             batch_size, seqlen_q = q.shape[0], q.shape[1]
             seqlen_k = kv.shape[1]
             assert kv.shape[0] == batch_size and kv.shape[3] == q.shape[2] and kv.shape[4] == q.shape[3]
-            if self.triton and (self.drop.p == 0.0 or not self.training):  # Triton version doesn't support dropout
-                output = flash_attn_kvpacked_func(q, kv, None, causal, self.softmax_scale)
-            else:
-                q = rearrange(q, "b s ... -> (b s) ...")
-                kv = rearrange(kv, "b s ... -> (b s) ...")
-                cu_seqlens_q = torch.arange(
-                    0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32, device=q.device
-                )
-                cu_seqlens_k = torch.arange(
-                    0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32, device=kv.device
-                )
-                output = flash_attn_unpadded_kvpacked_func(
-                    q,
-                    kv,
-                    cu_seqlens_q,
-                    cu_seqlens_k,
-                    seqlen_q,
-                    seqlen_k,
-                    self.drop.p if self.training else 0.0,
-                    softmax_scale=self.softmax_scale,
-                    causal=causal,
-                )
-                output = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
+
+            q = rearrange(q, "b s ... -> (b s) ...")
+            kv = rearrange(kv, "b s ... -> (b s) ...")
+            cu_seqlens_q = torch.arange(
+                0, (batch_size + 1) * seqlen_q, step=seqlen_q, dtype=torch.int32, device=q.device
+            )
+            cu_seqlens_k = torch.arange(
+                0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32, device=kv.device
+            )
+            output = flash_attn_unpadded_kvpacked_func(
+                q,
+                kv,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                seqlen_q,
+                seqlen_k,
+                self.drop.p if self.training else 0.0,
+                softmax_scale=self.softmax_scale,
+                causal=causal,
+            )
+            output = rearrange(output, "(b s) ... -> b s ...", b=batch_size)
             return output
 
 
@@ -394,7 +372,6 @@ class MHA(nn.Module):
             performance reason: for post-norm architecture, returning the input allows us
             to fuse the backward of nn.Linear with the residual connection.
         """
-        factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.embed_dim = embed_dim
         self.cross_attn = cross_attn
@@ -429,19 +406,19 @@ class MHA(nn.Module):
         inner_cross_attn_cls = FlashCrossAttention if use_flash_attn else CrossAttention
         if not self.cross_attn:
             if not self.return_residual:
-                self.Wqkv = linear_cls(embed_dim, 3 * embed_dim, bias=qkv_proj_bias, **factory_kwargs)
+                self.Wqkv = linear_cls(embed_dim, 3 * embed_dim, bias=qkv_proj_bias, device=device, dtype=dtype)
             else:
-                self.Wqkv = linear_resid_cls(embed_dim, 3 * embed_dim, bias=qkv_proj_bias, **factory_kwargs)
+                self.Wqkv = linear_resid_cls(embed_dim, 3 * embed_dim, bias=qkv_proj_bias, device=device, dtype=dtype)
             if self.dwconv:
                 self.dwconv_qkv = nn.Conv1d(
                     3 * embed_dim, 3 * embed_dim, kernel_size=3, padding=2, groups=3 * embed_dim
                 )
         else:
-            self.Wq = linear_cls(embed_dim, embed_dim, bias=qkv_proj_bias, **factory_kwargs)
+            self.Wq = linear_cls(embed_dim, embed_dim, bias=qkv_proj_bias, device=device, dtype=dtype)
             if not self.return_residual:
-                self.Wkv = linear_cls(embed_dim, 2 * embed_dim, bias=qkv_proj_bias, **factory_kwargs)
+                self.Wkv = linear_cls(embed_dim, 2 * embed_dim, bias=qkv_proj_bias, device=device, dtype=dtype)
             else:
-                self.Wkv = linear_resid_cls(embed_dim, 2 * embed_dim, bias=qkv_proj_bias, **factory_kwargs)
+                self.Wkv = linear_resid_cls(embed_dim, 2 * embed_dim, bias=qkv_proj_bias, device=device, dtype=dtype)
             if self.dwconv:
                 self.dwconv_q = nn.Conv1d(embed_dim, embed_dim, kernel_size=3, padding=2, groups=embed_dim)
                 self.dwconv_kv = nn.Conv1d(
@@ -451,7 +428,7 @@ class MHA(nn.Module):
         self.inner_cross_attn = inner_cross_attn_cls(
             causal=causal, softmax_scale=softmax_scale, attention_dropout=dropout
         )
-        self.out_proj = linear_cls(embed_dim, embed_dim, bias=out_proj_bias, **factory_kwargs)
+        self.out_proj = linear_cls(embed_dim, embed_dim, bias=out_proj_bias, device=device, dtype=dtype)
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, fused_ft_kernel=True):
         dtype = self.out_proj.weight.dtype if dtype is None else dtype
@@ -474,16 +451,9 @@ class MHA(nn.Module):
         assert self.layer_idx is not None, "Generation requires layer_idx in the constructor"
         return _update_kv_cache(kv, inference_params, self.layer_idx)
 
+
     def forward(
-        self,
-        x,
-        x_kv=None,
-        key_padding_mask=None,
-        cu_seqlens=None,
-        max_seqlen=None,
-        mixer_subset=None,
-        inference_params=None,
-        **kwargs
+        self, x, x_kv=None, key_padding_mask=None, cu_seqlens=None, max_seqlen=None, mixer_subset=None, **kwargs
     ):
         """
         Arguments:
@@ -500,8 +470,6 @@ class MHA(nn.Module):
             mixer_subset: for cross-attention only. If not None, will take a subset of x
                 before applying the query projection. Useful for e.g., ViT where we only care
                 about the CLS token in the last layer.
-            inference_params: for generation. Adapted from Megatron-LM (and Apex)
-            https://github.com/NVIDIA/apex/blob/3ff1a10f72ec07067c4e44759442329804ac5162/apex/transformer/testing/standalone_transformer_lm.py#L470
         """
         if cu_seqlens is not None:
             assert max_seqlen is not None
@@ -513,10 +481,6 @@ class MHA(nn.Module):
             assert cu_seqlens is None
             assert max_seqlen is None
             assert not self.use_flash_attn
-        if inference_params is not None:
-            assert key_padding_mask is None
-            assert cu_seqlens is None and max_seqlen is None
-            assert not self.dwconv
 
         kwargs = (
             {"cu_seqlens": cu_seqlens, "max_seqlen": max_seqlen, **kwargs}
@@ -534,47 +498,12 @@ class MHA(nn.Module):
                     self.dwconv_qkv(rearrange(qkv, "b s d -> b d s"))[..., :-2], "b d s -> b s d"
                 ).contiguous()
             qkv = rearrange(qkv, "... (three h d) -> ... three h d", three=3, d=self.head_dim)
-            if inference_params is None:
-                if self.rotary_emb_dim > 0:
-                    qkv = self.rotary_emb(qkv)
-                if not self.checkpointing:
-                    context = self.inner_attn(qkv, **kwargs)
-                else:
-                    context = torch.utils.checkpoint.checkpoint(self.inner_attn, qkv, **kwargs)
+            if self.rotary_emb_dim > 0:
+                qkv = self.rotary_emb(qkv)
+            if not self.checkpointing:
+                context = self.inner_attn(qkv, **kwargs)
             else:
-                if (not inference_params.fused_ft_kernel) or inference_params.sequence_len_offset == 0:
-                    if self.rotary_emb_dim > 0:
-                        qkv = self.rotary_emb(qkv, seqlen_offset=inference_params.sequence_len_offset)
-                    q = qkv[:, :, 0]
-                    kv = self._update_kv_cache(qkv[:, :, 1:], inference_params)
-                    # If we're processing the prompt, causal=None (use self.causal).
-                    # If we're decoding, then causal=False.
-                    causal = None if inference_params.sequence_len_offset == 0 else False
-                    context = self.inner_cross_attn(q, kv, causal=causal)
-                else:
-                    assert inference_params.fused_ft_kernel
-                    assert ft_attention is not None
-                    batch_start = inference_params.batch_size_offset
-                    batch_end = batch_start + qkv.shape[0]
-                    k_cache, v_cache = inference_params.key_value_memory_dict[self.layer_idx]
-                    lengths_per_sample = (
-                        inference_params.lengths_per_sample[batch_start:batch_end]
-                        if inference_params.lengths_per_sample is not None
-                        else None
-                    )
-                    rotary_emb_base = self.rotary_emb.base if self.rotary_emb_dim > 0 else 0
-                    context = ft_attention.single_query_attention(
-                        *rearrange(qkv, "b 1 three h d -> b three h d").unbind(dim=1),
-                        k_cache[batch_start:batch_end],
-                        v_cache[batch_start:batch_end],
-                        lengths_per_sample,
-                        inference_params.sequence_len_offset,
-                        self.rotary_emb_dim,
-                        rotary_emb_base,
-                        # neox_rotary_style
-                        (not self.rotary_emb.interleaved) if self.rotary_emb_dim > 0 else True
-                    )
-                    context = rearrange(context, "b h d -> b 1 h d")
+                context = torch.utils.checkpoint.checkpoint(self.inner_attn, qkv, **kwargs)
         else:
             if not self.return_residual:
                 q = self.Wq(x if mixer_subset is None else x[:, mixer_subset])
@@ -592,148 +521,19 @@ class MHA(nn.Module):
                 kv = rearrange(
                     self.dwconv_kv(rearrange(kv, "b s d -> b d s"))[..., :-2], "b d s -> b s d"
                 ).contiguous()
-            if inference_params is None:
-                if not self.checkpointing:
-                    context = self.inner_cross_attn(q, kv, **kwargs)
-                else:
-                    context = torch.utils.checkpoint.checkpoint(self.inner_cross_attn, q, kv, **kwargs)
+            if not self.checkpointing:
+                context = self.inner_cross_attn(q, kv, **kwargs)
             else:
-                kv = self._update_kv_cache(kv)
-                context = self.inner_cross_attn(q, kv, causal=False)
+                context = torch.utils.checkpoint.checkpoint(self.inner_cross_attn, q, kv, **kwargs)
         out = self.out_proj(rearrange(context, "... h d -> ... (h d)"))
         return out if not self.return_residual else (out, x)
 
+    def reset_parameters(self):
+        # TODO: check if this is necessary
+        def _init_weights(module, initializer_range=0.02):
+            if hasattr(module, 'weight') and module.weight is not None:
+                torch.nn.init.ones_(module.weight)  # type: ignore
+            if hasattr(module, 'bias') and module.bias is not None:
+                torch.nn.init.zeros_(module.bias)  # type: ignore
 
-class ParallelMHA(nn.Module):
-    """Multi-head self-attention and cross-attention"""
-
-    def __init__(
-        self,
-        embed_dim,
-        num_heads,
-        process_group,
-        qkv_proj_bias=True,
-        out_proj_bias=True,
-        dropout=0.0,
-        softmax_scale=None,
-        causal=False,
-        layer_idx=None,
-        rotary_emb_dim=0,
-        rotary_emb_base=10000.0,
-        rotary_emb_scale_base=None,
-        rotary_emb_interleaved=False,
-        use_flash_attn=False,
-        checkpointing=False,
-        sequence_parallel=True,
-        device=None,
-        dtype=None,
-    ) -> None:
-        factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__()
-        self.embed_dim = embed_dim
-        self.causal = causal
-        self.layer_idx = layer_idx
-        self.rotary_emb_dim = rotary_emb_dim
-        self.use_flash_attn = use_flash_attn
-        self.checkpointing = checkpointing
-
-        self.num_heads = num_heads
-        assert self.embed_dim % num_heads == 0, "self.kdim must be divisible by num_heads"
-        self.head_dim = self.embed_dim // num_heads
-
-        if self.rotary_emb_dim > 0:
-            assert RotaryEmbedding is not None, "rotary_emb is not installed"
-            self.rotary_emb = RotaryEmbedding(
-                self.rotary_emb_dim,
-                base=rotary_emb_base,
-                scale_base=rotary_emb_scale_base,
-                interleaved=rotary_emb_interleaved,
-                device=device,
-            )
-
-        if ColumnParallelLinear is None or RowParallelLinear is None:
-            raise ImportError("fused_dense is not installed")
-        self.Wqkv = ColumnParallelLinear(
-            embed_dim,
-            3 * embed_dim,
-            process_group,
-            bias=qkv_proj_bias,
-            sequence_parallel=sequence_parallel,
-            **factory_kwargs
-        )
-        inner_attn_cls = FlashSelfAttention if use_flash_attn else SelfAttention
-        inner_cross_attn_cls = FlashCrossAttention if use_flash_attn else CrossAttention
-        self.inner_attn = inner_attn_cls(causal=causal, softmax_scale=softmax_scale, attention_dropout=dropout)
-        self.inner_cross_attn = inner_cross_attn_cls(
-            causal=causal, softmax_scale=softmax_scale, attention_dropout=dropout
-        )
-        self.out_proj = RowParallelLinear(
-            embed_dim,
-            embed_dim,
-            process_group,
-            bias=out_proj_bias,
-            sequence_parallel=sequence_parallel,
-            **factory_kwargs
-        )
-
-    def forward(self, x, seqlen=None, inference_params=None, **kwargs):
-        """
-        Arguments:
-            x: (batch, seqlen, hidden_dim) (where hidden_dim = num heads * head dim) if seqlen=None.
-                If seqlen is not None, x is (batch * seqlen, hidden_dim). This is so that when we
-                split x during sequence parallel, we split the batch * seqlen dimension
-                (in case batch is small).
-        """
-        qkv = self.Wqkv(x)
-        if seqlen is None:
-            qkv = rearrange(qkv, "b s (three h d) -> b s three h d", three=3, d=self.head_dim)
-        else:
-            qkv = rearrange(qkv, "(b s) (three h d) -> b s three h d", s=seqlen, three=3, d=self.head_dim)
-        if inference_params is None:
-            if self.rotary_emb_dim > 0:
-                qkv = self.rotary_emb(qkv)
-            if not self.checkpointing:
-                context = self.inner_attn(qkv, **kwargs)
-            else:
-                context = torch.utils.checkpoint.checkpoint(self.inner_attn, qkv, **kwargs)
-        else:
-            if (not inference_params.fused_ft_kernel) or inference_params.sequence_len_offset == 0:
-                if self.rotary_emb_dim > 0:
-                    qkv = self.rotary_emb(qkv, seqlen_offset=inference_params.sequence_len_offset)
-                q = qkv[:, :, 0]
-                assert self.layer_idx is not None, "Generation requires layer_idx in the constructor"
-                kv = _update_kv_cache(qkv[:, :, 1:], inference_params, self.layer_idx)
-                # If we're processing the prompt, causal=None (use self.causal).
-                # If we're decoding, then causal=False.
-                causal = None if inference_params.sequence_len_offset == 0 else False
-                context = self.inner_cross_attn(q, kv, causal=causal)
-            else:
-                assert inference_params.fused_ft_kernel
-                assert ft_attention is not None
-                batch_start = inference_params.batch_size_offset
-                batch_end = batch_start + qkv.shape[0]
-                k_cache, v_cache = inference_params.key_value_memory_dict[self.layer_idx]
-                lengths_per_sample = (
-                    inference_params.lengths_per_sample[batch_start:batch_end]
-                    if inference_params.lengths_per_sample is not None
-                    else None
-                )
-                rotary_emb_base = self.rotary_emb.base if self.rotary_emb_dim > 0 else 0
-                context = ft_attention.single_query_attention(
-                    *rearrange(qkv, "b 1 three h d -> b three h d").unbind(dim=1),
-                    k_cache[batch_start:batch_end],
-                    v_cache[batch_start:batch_end],
-                    lengths_per_sample,
-                    inference_params.sequence_len_offset,
-                    self.rotary_emb_dim,
-                    rotary_emb_base,
-                    # neox_rotary_style
-                    (not self.rotary_emb.interleaved) if self.rotary_emb_dim > 0 else True
-                )
-                context = rearrange(context, "b h d -> b 1 h d")
-        if seqlen is None:
-            context = rearrange(context, "b s h d -> b s (h d)")
-        else:
-            context = rearrange(context, "b s h d -> (b s) (h d)")
-        out = self.out_proj(context)
-        return out
+        self.apply(_init_weights)

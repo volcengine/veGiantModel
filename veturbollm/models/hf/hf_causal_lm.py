@@ -16,18 +16,6 @@ class TurboHFCausalLM(TurboHFModelWithZLoss):
     """Configures a :class:`.HuggingFaceModel` around a Causal LM.
 
     Args:
-        cfg (DictConfig): An omegaconf dictionary used to configure the model:
-            cfg.pretrained_model_name_or_path (str): The name of or local path to
-                the HF Causal LM (e.g., `gpt2` to instantiate a GPT2LMHeadModel).
-            cfg.config_overrides (dict, optional): An optional dictionary of keyword
-                arguments that override the default configuration associated with
-                cfg.pretrained_model_name_or_path.
-            cfg.pretrained (bool): Whether to instantiate the model with pre-trained
-                weights coming from cfg.pretrained_model_name_or_path. If ``True``,
-                cfg.config_overrides must be compatible with the pre-trained weights.
-            cfg.init_device ('cpu' | 'meta'): Which device, 'cpu' or 'meta', to
-                initialize the model on. Currently, `meta` is only supported when
-                cfg.pretrained is ``False``. Default: ``'cpu'``.
         tokenizer (PreTrainedTokenizer): The tokenizer that the model will use.
     """
 
@@ -63,7 +51,7 @@ class TurboHFCausalLM(TurboHFModelWithZLoss):
                 init_device = "cpu"
             else:
                 # TODO: 65B model need meta device, but this action will make process hang
-                init_device = "cpu"
+                init_device = "meta"
         else:
             init_device = "cpu"
 
@@ -86,23 +74,22 @@ class TurboHFCausalLM(TurboHFModelWithZLoss):
                 )
         else:
             init_device = "meta"
-            if args.model.enable_flash_attn:
-                if "gpt2" in args.model.pretrained_model_name_or_path:
-                    from veturbollm.models.hf.gpt import GPTLMHeadModel
+            from veturbollm.utils.meta_init_context import init_empty_weights
 
-                    config.use_flash_attn = True
-                    model = GPTLMHeadModel(config, device=init_device)
-                elif "llama" in args.model.pretrained_model_name_or_path:
-                    from veturbollm.models.hf.gpt import GPTLMHeadModel
-                    from veturbollm.models.hf.llama import llama_config_to_gpt2_config
-
-                    config = llama_config_to_gpt2_config(config)
-                    config.use_flash_attn = True
-                    model = GPTLMHeadModel(config, device=init_device)
+            with init_empty_weights():
+                if args.model.enable_flash_attn:
+                    if "gpt" in args.model.pretrained_model_name_or_path:
+                        from veturbollm.models.hf.gpt import GPTLMHeadModel
+                        config.use_flash_attn = True
+                        model = GPTLMHeadModel(config)
+                    elif "llama" in args.model.pretrained_model_name_or_path:
+                        from veturbollm.models.hf.llama import LLaMAForCausalLM
+                        config.use_flash_attn = True
+                        model = LLaMAForCausalLM(config)
+                    else:
+                        raise ValueError("Flash attention is only supported for GPT and LLaMA.")
                 else:
-                    raise ValueError("Flash attention is only supported for GPT and LLAMA.")
-            else:
-                model = AutoModelForCausalLM.from_config(config, device=init_device)
+                    model = AutoModelForCausalLM.from_config(config)
         turbo_model = super().__init__(model=model, tokenizer=tokenizer)
 
         return turbo_model

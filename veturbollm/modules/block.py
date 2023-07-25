@@ -5,14 +5,13 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from flash_attn.modules.mlp import Mlp
 from torch import Tensor
 from torchvision.ops import StochasticDepth
 
-from veturbollm.modules.layer_norm import dropout_add_layer_norm, dropout_add_layer_norm_parallel_residual
+from veturbollm.modules.layer_norm import dropout_add_layer_norm
 from veturbollm.modules.mha import MHA
-from veturbollm.modules.rms_norm import RMSNorm, dropout_add_rms_norm, dropout_add_rms_norm_parallel_residual
+from veturbollm.modules.mlp import MLP
+from veturbollm.modules.rms_norm import RMSNorm, dropout_add_rms_norm
 
 
 class Block(nn.Module):
@@ -31,8 +30,6 @@ class Block(nn.Module):
         fused_dropout_add_ln=False,
         return_residual=False,
         residual_in_fp32=False,
-        sequence_parallel=False,
-        mark_shared_params=False,
     ):
         """
         For prenorm=True, this Block has a slightly different structure compared to a regular
@@ -61,7 +58,7 @@ class Block(nn.Module):
         if mixer_cls is None:
             mixer_cls = partial(MHA, num_heads=dim // 64)
         if mlp_cls is None:
-            mlp_cls = partial(Mlp, hidden_features=4 * dim)
+            mlp_cls = partial(MLP, hidden_features=4 * dim)
         self.mixer = mixer_cls(dim)
         self.dropout1 = dropout_cls(resid_dropout1)
         self.drop_path1 = StochasticDepth(drop_path1, mode="row")
@@ -76,30 +73,6 @@ class Block(nn.Module):
             assert dropout_add_layer_norm is not None, "dropout_layer_norm is not installed"
             assert dropout_add_rms_norm is not None, "dropout_layer_norm is not installed"
             assert isinstance(self.norm1, (nn.LayerNorm, RMSNorm)) and isinstance(self.dropout1, nn.Dropout)
-
-        # TD [2023-01-07]: TODO: During training, if sequence_parallel is False and dropout != 0.0,
-        # then the input to each worker in the tensor parallel group will be different.
-        # This would produce wrong outputs? Somehow we'd need to sync the RNG state across workers.
-        # For now this is not an issue because we always use sequence_parallel=True during training
-        # and only use sequence_parallel=False during inference.
-
-        # Mark the norm parameters as "sequence_parallel" so that we run all-reduce on their grads.
-        if sequence_parallel:
-            for p in self.norm1.parameters():
-                p._sequence_parallel = True
-            if hasattr(self, "norm2"):
-                for p in self.norm2.parameters():
-                    p._sequence_parallel = True
-        # Mark the norm parameters as "shared_params" so that we sync their values at init.
-        if mark_shared_params:
-            for p in self.norm1.parameters():
-                p._shared_params = True
-            if hasattr(self, "norm2"):
-                for p in self.norm2.parameters():
-                    p._shared_params = True
-
-    def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
-        return self.mixer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
 
     def forward(self, hidden_states: Tensor, residual: Optional[Tensor] = None, mixer_subset=None, mixer_kwargs=None):
         r"""Pass the input through the encoder layer.
@@ -239,132 +212,3 @@ class Block(nn.Module):
                 nn.init.normal_(module.weight, std=initializer_range)
 
         self.apply(_init_weights)
-
-
-class ParallelBlock(nn.Module):
-    """The attention (mixer) and MLP blocks are done in parallel, similar to GPT-J, GPT-NeoX,
-    and PaLM.
-    """
-
-    def __init__(
-        self,
-        dim,
-        mixer_cls=None,
-        mlp_cls=None,
-        norm_cls=nn.LayerNorm,
-        dropout_cls=nn.Dropout,
-        resid_dropout1=0.0,
-        resid_dropout2=0.0,
-        tied_norm=False,
-        fused_dropout_add_ln=False,
-        residual_in_fp32=False,
-        sequence_parallel=False,
-        mark_shared_params=False,
-    ):
-        """
-        This Block has a slightly different structure compared to a regular
-        prenorm Transformer block.
-        The standard block is: LN -> MHA / MLP -> Dropout -> Add.
-        [Ref: https://arxiv.org/abs/2002.04745]
-        Here we have: Dropout -> Add -> LN -> MHA / MLP, returning both
-        the hidden_states (output1 of the MHA / MLP) and the residual.
-        This is for performance reasons, as we can fuse the dropout, add and LayerNorm.
-        The residual needs to be provided (except for the very first block).
-        """
-        super().__init__()
-        self.tied_norm = tied_norm
-        self.fused_dropout_add_ln = fused_dropout_add_ln
-        self.residual_in_fp32 = residual_in_fp32
-        if mixer_cls is None:
-            mixer_cls = partial(MHA, num_heads=dim // 64)
-        if mlp_cls is None:
-            mlp_cls = partial(Mlp, hidden_features=4 * dim)
-        self.mixer = mixer_cls(dim)
-        self.dropout1 = dropout_cls(resid_dropout1)
-        self.norm1 = norm_cls(dim)
-        self.mlp = mlp_cls(dim)
-        self.dropout2 = dropout_cls(resid_dropout2)
-        if not self.tied_norm:
-            self.norm2 = norm_cls(dim)
-
-        if self.fused_dropout_add_ln:
-            assert dropout_add_layer_norm_parallel_residual is not None, "dropout_layer_norm is not installed"
-            assert dropout_add_rms_norm_parallel_residual is not None, "dropout_layer_norm is not installed"
-            assert isinstance(self.norm1, (nn.LayerNorm, RMSNorm)) and isinstance(self.dropout1, nn.Dropout)
-
-        # TD [2023-01-07]: TODO: During training, if sequence_parallel is False and dropout != 0.0,
-        # then the input to each worker in the tensor parallel group will be different.
-        # This would produce wrong outputs? Somehow we'd need to sync the RNG state across workers.
-        # For now this is not an issue because we always use sequence_parallel=True during training
-        # and only use sequence_parallel=False during inference.
-
-        # Mark the norm parameters as "sequence_parallel" so that we run all-reduce on their grads.
-        if sequence_parallel:
-            for p in self.norm1.parameters():
-                p._sequence_parallel = True
-            if hasattr(self, "norm2"):
-                for p in self.norm2.parameters():
-                    p._sequence_parallel = True
-        # Mark the norm parameters as "shared_params" so that we sync their values at init.
-        if mark_shared_params:
-            for p in self.norm1.parameters():
-                p._shared_params = True
-            if hasattr(self, "norm2"):
-                for p in self.norm2.parameters():
-                    p._shared_params = True
-
-    def forward(
-        self,
-        hidden_states1: Tensor,
-        hidden_states2: Optional[Tensor] = None,
-        residual: Optional[Tensor] = None,
-        mixer_kwargs=None,
-    ):
-        r"""Pass the input through the encoder layer.
-
-        Args:
-            hidden_states1: the output of the previous attention (mixer) or embedding layer.
-            hidden_states2: the output of the previous MLP layer (if None, will use hidden_states1).
-            residual.
-        """
-        fused_add_norm_fn = (
-            dropout_add_rms_norm_parallel_residual
-            if isinstance(self.norm1, RMSNorm)
-            else dropout_add_layer_norm_parallel_residual
-        )
-        if not self.fused_dropout_add_ln:
-            dropped1 = self.dropout1(hidden_states1)
-            # For the very 1st block, we only want 1 dropout, not two different dropouts
-            if hidden_states2 is not None:
-                dropped2 = self.dropout2(hidden_states2)
-                residual = (residual + dropped1 + dropped2) if residual is not None else dropped1 + dropped2
-            else:
-                residual = (residual + dropped1) if residual is not None else dropped1
-            hidden_states1 = self.norm1(residual.to(dtype=self.norm1.weight.dtype))
-            hidden_states2 = (
-                self.norm2(residual.to(dtype=self.norm2.weight.dtype)) if not self.tied_norm else hidden_states1
-            )
-            if self.residual_in_fp32:
-                residual = residual.to(torch.float32)
-        else:
-            weight2, bias2 = (self.norm2.weight, self.norm2.bias) if not self.tied_norm else (None, None)
-            hidden_states1, hidden_states2, residual = fused_add_norm_fn(
-                hidden_states1,
-                hidden_states2,
-                residual,
-                self.norm1.weight,
-                self.norm1.bias,
-                weight2,
-                bias2,
-                self.dropout1.p if self.training else 0.0,
-                self.norm1.eps,
-                prenorm=True,
-                residual_in_fp32=self.residual_in_fp32,
-            )
-            if self.tied_norm:
-                hidden_states2 = hidden_states1
-        if mixer_kwargs is None:
-            mixer_kwargs = {}
-        hidden_states1 = self.mixer(hidden_states1, **mixer_kwargs)
-        hidden_states2 = self.mlp(hidden_states2)
-        return hidden_states1, hidden_states2, residual

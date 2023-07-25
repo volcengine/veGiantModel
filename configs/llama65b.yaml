@@ -2,7 +2,7 @@
 
 tokenizer:
   pretrained_model_name_or_path: ./huggingface/llama-65b-hf
-  use_slow_tokenizer: True
+  use_slow_tokenizer: False
 
 model:
   pretrained_model_name_or_path: ./huggingface/llama-65b-hf
@@ -16,6 +16,8 @@ distributed:
   strategy: fsdp
   tensor_model_parallel_size: 1
   pipeline_model_parallel_size: 1
+  fsdp_strategy_config:
+    activation_checkpointing: True
 
 dataset:
   dataset_name: ./huggingface/wikitext
@@ -34,7 +36,7 @@ learning_rate:
   lr_warmup_samples: 0
 
 training:
-  micro_batch_size: 4
+  micro_batch_size: 16
   global_batch_size: null
   gradient_accumulation_steps:  1
   rampup_batch_size: null
