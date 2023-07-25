@@ -1,6 +1,7 @@
 import torch
 import warnings
 
+
 def get_torch_dtype(dtype: str):
     """Convert common string representations of dtypes to torch dtypes."""
     if dtype in ["float32", "torch.float32", "fp32"]:
