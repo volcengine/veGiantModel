@@ -6,4 +6,4 @@ sentencepiece
 pydantic
 protobuf==3.20
 https://veturbo-cn-beijing.tos-cn-beijing.ivolces.com/veturbo/veturbo-0.1.0+e5d8df7-py3-none-any.whl
-https://veturbo-cn-beijing.tos-cn-beijing.ivolces.com/veturbo%2F0.1.0%2Fveturbo-llm%2Fflash_attn-1.0.7-cp310-cp310-linux_x86_64.whl
+https://veturbo-cn-beijing.tos-cn-beijing.ivolces.com/veturbo/0.1.0/veturbo-llm/flash_attn-2.0.1-cp310-cp310-linux_x86_64.whl

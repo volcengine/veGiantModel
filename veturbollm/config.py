@@ -34,6 +34,7 @@ class FSDPStragegyConfig(BaseModel):
     sync_module_states: bool = True
     activation_checkpointing: bool = False
 
+
 class DistributedConfig(BaseModel):
     strategy: str = "ddp"  # ddp, fsdp
     fsdp_strategy_config: FSDPStragegyConfig = FSDPStragegyConfig()

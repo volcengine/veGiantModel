@@ -133,7 +133,6 @@ def state_dicts_from_checkpoint(checkpoint_path: str, model_name: str) -> dict:
     ]
 
 
-
 def create_mixer_cls(config: LlamaConfig, layer_idx=None, device=None, dtype=None):
     head_dim = config.hidden_size // config.num_attention_heads
     softmax_scale = head_dim ** (-0.5)
@@ -351,7 +350,9 @@ class LLaMAForCausalLM(LLaMAPreTrainedModel, GenerationMixin):
             )
         )
 
-    def forward(self, input_ids, labels=None, position_ids=None, past_key_values=None, last_token_only=False, **kwargs):
+    def forward(
+        self, input_ids, labels=None, position_ids=None, past_key_values=None, last_token_only=False, **kwargs
+    ):
         """
         last_token_only: whether to return the logit for the last token only,
             of shape (batch_size, vocab_size)

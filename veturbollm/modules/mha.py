@@ -10,10 +10,10 @@ from einops import rearrange
 from veturbollm.modules.rotary import RotaryEmbedding
 
 try:
-    from flash_attn.flash_attn_interface import flash_attn_unpadded_qkvpacked_func
-    from flash_attn.flash_attn_interface import flash_attn_unpadded_kvpacked_func
+    from flash_attn.flash_attn_interface import flash_attn_varlen_qkvpacked_func
+    from flash_attn.flash_attn_interface import flash_attn_varlen_kvpacked_func
 except ImportError:
-    flash_attn_unpadded_qkvpacked_func, flash_attn_unpadded_kvpacked_func = None, None
+    flash_attn_varlen_qkvpacked_func, flash_attn_varlen_kvpacked_func = None, None
 
 
 try:
@@ -36,7 +36,7 @@ class FlashSelfAttention(nn.Module):
     def __init__(self, causal=False, softmax_scale=None, attention_dropout=0.0):
         super().__init__()
         if attention_dropout != 0.0:
-            assert flash_attn_unpadded_qkvpacked_func is not None, "FlashAttention is not installed"
+            assert flash_attn_varlen_qkvpacked_func is not None, "FlashAttention is not installed"
 
         self.causal = causal
         self.softmax_scale = softmax_scale
@@ -67,7 +67,7 @@ class FlashSelfAttention(nn.Module):
             assert cu_seqlens.dtype == torch.int32
             assert max_seqlen is not None
             assert isinstance(max_seqlen, int)
-            return flash_attn_unpadded_qkvpacked_func(
+            return flash_attn_varlen_qkvpacked_func(
                 qkv,
                 cu_seqlens,
                 max_seqlen,
@@ -82,7 +82,7 @@ class FlashSelfAttention(nn.Module):
             qkv = rearrange(qkv, "b s ... -> (b s) ...")
             max_seqlen = seqlen
             cu_seqlens = torch.arange(0, (batch_size + 1) * seqlen, step=seqlen, dtype=torch.int32, device=qkv.device)
-            output = flash_attn_unpadded_qkvpacked_func(
+            output = flash_attn_varlen_qkvpacked_func(
                 qkv,
                 cu_seqlens,
                 max_seqlen,
@@ -108,7 +108,7 @@ class FlashCrossAttention(nn.Module):
     def __init__(self, causal=False, softmax_scale=None, attention_dropout=0.0):
         super().__init__()
         if attention_dropout != 0.0:
-            assert flash_attn_unpadded_kvpacked_func is not None, "FlashAttention is not installed"
+            assert flash_attn_varlen_kvpacked_func is not None, "FlashAttention is not installed"
         self.causal = causal
         self.softmax_scale = softmax_scale
         self.drop = nn.Dropout(attention_dropout)
@@ -139,7 +139,7 @@ class FlashCrossAttention(nn.Module):
             assert cu_seqlens_k.dtype == torch.int32
             assert max_seqlen_k is not None
             assert isinstance(max_seqlen, int)
-            return flash_attn_unpadded_kvpacked_func(
+            return flash_attn_varlen_kvpacked_func(
                 q,
                 kv,
                 cu_seqlens,
@@ -163,7 +163,7 @@ class FlashCrossAttention(nn.Module):
             cu_seqlens_k = torch.arange(
                 0, (batch_size + 1) * seqlen_k, step=seqlen_k, dtype=torch.int32, device=kv.device
             )
-            output = flash_attn_unpadded_kvpacked_func(
+            output = flash_attn_varlen_kvpacked_func(
                 q,
                 kv,
                 cu_seqlens_q,
@@ -451,7 +451,6 @@ class MHA(nn.Module):
         assert self.layer_idx is not None, "Generation requires layer_idx in the constructor"
         return _update_kv_cache(kv, inference_params, self.layer_idx)
 
-
     def forward(
         self, x, x_kv=None, key_padding_mask=None, cu_seqlens=None, max_seqlen=None, mixer_subset=None, **kwargs
     ):
@@ -531,9 +530,9 @@ class MHA(nn.Module):
     def reset_parameters(self):
         # TODO: check if this is necessary
         def _init_weights(module, initializer_range=0.02):
-            if hasattr(module, 'weight') and module.weight is not None:
+            if hasattr(module, "weight") and module.weight is not None:
                 torch.nn.init.ones_(module.weight)  # type: ignore
-            if hasattr(module, 'bias') and module.bias is not None:
+            if hasattr(module, "bias") and module.bias is not None:
                 torch.nn.init.zeros_(module.bias)  # type: ignore
 
         self.apply(_init_weights)

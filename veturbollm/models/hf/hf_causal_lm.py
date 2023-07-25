@@ -80,10 +80,12 @@ class TurboHFCausalLM(TurboHFModelWithZLoss):
                 if args.model.enable_flash_attn:
                     if "gpt" in args.model.pretrained_model_name_or_path:
                         from veturbollm.models.hf.gpt import GPTLMHeadModel
+
                         config.use_flash_attn = True
                         model = GPTLMHeadModel(config)
                     elif "llama" in args.model.pretrained_model_name_or_path:
                         from veturbollm.models.hf.llama import LLaMAForCausalLM
+
                         config.use_flash_attn = True
                         model = LLaMAForCausalLM(config)
                     else:
