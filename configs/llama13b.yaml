@@ -10,6 +10,7 @@ model:
   pretrained: False
   init_device: cpu
   enable_flash_attn: True
+  enable_dynamo: False
 
 distributed:
   strategy: fsdp

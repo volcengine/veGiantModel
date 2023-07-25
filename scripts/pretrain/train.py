@@ -1,26 +1,24 @@
 import argparse
-import json
 import logging
 import math
-import os
 
 import datasets
 import torch
 import torch.distributed as dist
 import transformers
-from accelerate.utils import set_seed
 from torch.utils.data import DataLoader
 from transformers import default_data_collator
 
-from veturbollm.strategy import prepare_distributed_strategy
 from veturbollm import initialize_veturbollm
 from veturbollm.data.datasets import get_train_eval_dataset
-from veturbollm.data.sampler import PretrainingRandomSampler, RandomSeedDataset, PretrainingSampler
+from veturbollm.data.sampler import PretrainingRandomSampler, PretrainingSampler, RandomSeedDataset
 from veturbollm.global_vars import get_args, get_timers
 from veturbollm.models.hf.hf_causal_lm import TurboHFCausalLM
+from veturbollm.strategy import prepare_distributed_strategy
 from veturbollm.tokenizer import build_tokenizer
 from veturbollm.utils import distribution as dist_utils
 from veturbollm.utils.log import training_log
+from veturbollm.utils.tools import set_seed
 
 # The flag below controls whether to allow TF32 on matmul. This flag defaults to False
 # in PyTorch 1.12 and later.
@@ -39,8 +37,6 @@ def parse_args():
         default=None,
         help="Path to a local config file",
     )
-    parser.add_argument("--seed", type=int, default=42, help="A seed for reproducible training.")
-    parser.add_argument("--local-rank", type=int, default=0, help="local rank")
     args = parser.parse_args()
     return args
 
@@ -69,9 +65,7 @@ def main():
         datasets.utils.logging.set_verbosity_error()
         transformers.utils.logging.set_verbosity_error()
 
-    # If passed along, set the training seed now.
-    if _args.seed is not None:
-        set_seed(_args.seed)
+    set_seed(args.seed)
 
     tokenizer = build_tokenizer(args)
     train_dataset, eval_dataset = get_train_eval_dataset(tokenizer)
@@ -82,8 +76,8 @@ def main():
         len(train_dataset),
         0,
         args.training.micro_batch_size,
-        dist.get_rank(),
-        dist.get_world_size(),
+        0,
+        1,
         data_sharding=True,
     )
     eval_sampler = PretrainingSampler(
@@ -112,6 +106,9 @@ def main():
 
     # Strategy
     model, optimizer, lr_scheduler = prepare_distributed_strategy(model)
+
+    scaler = torch.cuda.amp.GradScaler(enabled=args.model.enable_native_amp)
+
     print(model)
 
     # Afterwards we recalculate our number of training epochs
@@ -137,31 +134,41 @@ def main():
 
     total_loss_dict = {}
 
-    timers('interval-time', log_level=0).start(barrier=True)
+    timers("interval-time", log_level=0).start(barrier=True)
     micro_step = 0
     total_flops = 0
     # for epoch in range(starting_epoch, args.training.train_epochs):
     while True:
         for _, batch in enumerate(train_dataloader):
             model.train()
-            timers('forward-backward', log_level=1).start()
+            timers("forward-backward", log_level=1).start()
             outputs = model(batch)
             loss = outputs.loss
-            loss_dict = {'lm loss': loss.detach().float()}
-            loss.backward()
-            timers('forward-backward').stop()
+            loss_dict = {"lm loss": loss.detach().float()}
+            scaler.scale(loss).backward()
+            timers("forward-backward").stop()
             micro_step += 1
             total_flops += model.flops_per_batch(batch) / 1e12
-            loss_dict['tflops'] = total_flops
+            loss_dict["tflops"] = total_flops
             if micro_step % args.training.gradient_accumulation_steps == 0:
-                timers('optimizer', log_level=1).start()
-                optimizer.step()
+                timers("optimizer", log_level=1).start()
+                scaler.step(optimizer)
                 lr_scheduler.step()
+                scaler.update()
                 optimizer.zero_grad()
-                timers('optimizer').stop()
+                timers("optimizer").stop()
                 completed_steps += 1
                 args.consumed_train_samples += args.training.global_batch_size
-                training_log(loss_dict, total_loss_dict, optimizer.param_groups[0]['lr'], completed_steps, 1, True, 0)
+
+                training_log(
+                    loss_dict,
+                    total_loss_dict,
+                    optimizer.param_groups[0]["lr"],
+                    completed_steps,
+                    scaler.get_scale(),
+                    True,
+                    0,
+                )
                 total_flops = 0
                 if completed_steps >= args.training.train_iters:
                     break

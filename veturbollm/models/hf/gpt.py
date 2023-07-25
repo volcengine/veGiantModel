@@ -16,9 +16,7 @@ from einops import rearrange
 from flash_attn.models.gpt_neox import remap_state_dict_hf_gpt_neox
 from flash_attn.models.gptj import remap_state_dict_hf_gptj
 from flash_attn.models.opt import remap_state_dict_hf_opt
-from flash_attn.modules.embedding import GPT2Embeddings
-
-from flash_attn.modules.mlp import FusedMLP, GatedMlp, Mlp
+from veturbollm.modules.mlp import GatedMLP, MLP
 from flash_attn.ops.activations import sqrelu_fwd
 from flash_attn.utils.pretrained import state_dict_from_pretrained
 from torch.nn import CrossEntropyLoss
@@ -28,16 +26,12 @@ from transformers import GenerationConfig, GenerationMixin, GPT2Config
 
 from veturbollm.models.hf.llama import remap_state_dict_hf_llama
 from veturbollm.modules.block import Block
+from veturbollm.modules.embedding import GPT2Embeddings
 from veturbollm.modules.layer_norm import dropout_add_layer_norm
-from veturbollm.modules.rms_norm import RMSNorm, dropout_add_rms_norm
 from veturbollm.modules.mha import MHA
+from veturbollm.modules.rms_norm import RMSNorm, dropout_add_rms_norm
 
-try:
-    from flash_attn.ops.triton.mlp import FusedDenseSqreluDense
-except ImportError:
-    FusedDenseSqreluDense = None
-
-
+FusedMLP = None
 logger = logging.getLogger(__name__)
 
 
@@ -110,7 +104,7 @@ def create_mlp_cls(config, layer_idx=None, device=None, dtype=None):
                 else (F.silu if config.activation_function == "swiglu" else F.gelu)
             )
             mlp_cls = partial(
-                GatedMlp,
+                GatedMLP,
                 hidden_features=config.n_inner,
                 activation=activation,
                 bias1=mlp_fc1_bias,
@@ -128,7 +122,7 @@ def create_mlp_cls(config, layer_idx=None, device=None, dtype=None):
                 )
                 activation = partial(F.gelu, approximate=approximate)
             mlp_cls = partial(
-                Mlp,
+                MLP,
                 hidden_features=config.n_inner,
                 activation=activation,
                 bias1=mlp_fc1_bias,
@@ -317,9 +311,9 @@ class GPTModel(GPTPreTrainedModel):
             norm_cls = nn.LayerNorm if not use_rms_norm else RMSNorm
             self.ln_f = norm_cls(config.hidden_size, eps=config.layer_norm_epsilon, **factory_kwargs)
 
-        self.apply(
-            partial(_init_weights, n_layer=config.num_hidden_layers, initializer_range=config.initializer_range)
-        )
+        # self.apply(
+        #     partial(_init_weights, n_layer=config.num_hidden_layers, initializer_range=config.initializer_range)
+        # )
 
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         return {
@@ -381,17 +375,14 @@ class GPTLMHeadModel(GPTPreTrainedModel, GenerationMixin):
         self.lm_head = nn.Linear(embed_dim, vocab_size, bias=lm_head_bias, **factory_kwargs)
 
         # Initialize weights and apply final processing
-        self.apply(
-            partial(_init_weights, n_layer=config.num_hidden_layers, initializer_range=config.initializer_range)
-        )
+        # self.apply(
+        #     partial(_init_weights, n_layer=config.num_hidden_layers, initializer_range=config.initializer_range)
+        # )
         self.tie_weights()
 
     def tie_weights(self):
         if self.tie_word_embeddings:
             self.lm_head.weight = self.transformer.embeddings.word_embeddings.weight
-
-    def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
-        return self.transformer.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
 
     def reset_parameters(self):
         # TODO: check if this is necessary

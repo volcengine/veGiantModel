@@ -1,29 +1,11 @@
 import functools
-import warnings
 
 import torch
 from torch.distributed.fsdp import FullyShardedDataParallel, MixedPrecision
-from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+
+from veturbollm.utils.dtype import get_torch_dtype
 
 from .base import Strategy
-
-
-def get_torch_dtype(dtype: str):
-    """Convert common string representations of dtypes to torch dtypes."""
-    if dtype in ["float32", "torch.float32", "fp32"]:
-        return torch.float32
-    elif dtype in ["float16", "torch.float16", "half", "fp16", "amp", "amp_fp16"]:
-        return torch.float16
-    elif dtype in ["bfloat16", "bfloat", "torch.bfloat16", "bf16", "amp_bf16"]:
-        return torch.bfloat16
-    elif dtype in ["float8", "torch.float8", "fp8", "amp_fp8"]:
-        if hasattr(torch, "float8"):
-            raise NotImplementedError("Torch has enabled float8. This should be updated to `return torch.float8`")
-        else:
-            warnings.warn("We use torch.bfloat16 by default for amp_fp8 as there is no fp8 datatype in PyTorch yet.")
-            return torch.bfloat16
-    else:
-        raise ValueError(f"Not sure how to convert dtype={dtype} to a torch dtype.")
 
 
 def get_mixed_precision(precision, mixed_precision="DEFAULT", keep_low_precision_grads=False):
@@ -69,40 +51,60 @@ def get_mixed_precision(precision, mixed_precision="DEFAULT", keep_low_precision
 
 class FSDPStrategy(Strategy):
     def __init__(
-        self, precision="amp_bf16", forward_prefetch=True, limit_all_gathers=True, sync_module_states=True
+        self,
+        precision="amp_bf16",
+        forward_prefetch=True,
+        limit_all_gathers=True,
+        sync_module_states=True,
+        activation_checkpointing=False,
     ) -> None:
         self.precision = precision
         self.forward_prefetch = forward_prefetch
         self.limit_all_gathers = limit_all_gathers
         self.sync_module_states = sync_module_states
+        self.activation_checkpointing = activation_checkpointing
 
     def setup_model_and_optimizer(self, model, optimizer=None):
-        if "gpt2" in model.config.model_type:
-            from veturbollm.modules.block import Block
-
-            transformer_layer_cls = [Block]
-        elif "llama" in model.config.model_type:
-            from transformers.models.llama.modeling_llama import LlamaDecoderLayer
-
-            transformer_layer_cls = [LlamaDecoderLayer]
-        else:
-            raise ValueError(f"Unsupported model {model._name_or_path}")
-
-        auto_wrap_policy = functools.partial(
-            transformer_auto_wrap_policy,
-            transformer_layer_cls=transformer_layer_cls,
-        )
+        def __auto_wrap_policy(module: torch.nn.Module, recurse: bool, nonwrapped_numel: int) -> bool:
+            if recurse:
+                return True
+            should_be_wrapped = False
+            if hasattr(module, "_fsdp_wrap"):
+                should_be_wrapped = bool(module._fsdp_wrap)
+            else:
+                should_be_wrapped = False
+            return should_be_wrapped
 
         mixed_precision = get_mixed_precision(self.precision)[0]
-
         model = FullyShardedDataParallel(
             model,
-            auto_wrap_policy=auto_wrap_policy,
+            auto_wrap_policy=__auto_wrap_policy,
             device_id=torch.cuda.current_device(),
             forward_prefetch=self.forward_prefetch,
             limit_all_gathers=self.limit_all_gathers,
             mixed_precision=mixed_precision,
             sync_module_states=self.sync_module_states,
         )
+
+        if self.activation_checkpointing:
+            from torch.distributed.algorithms._checkpoint.checkpoint_wrapper import (
+                CheckpointImpl,
+                apply_activation_checkpointing,
+                checkpoint_wrapper,
+            )
+
+            def check_fn(module: torch.nn.Module) -> bool:
+                should_be_check = False
+                if hasattr(module, "_activation_checkpoint_wrap"):
+                    should_be_check = bool(module._activation_checkpoint_wrap)
+                else:
+                    should_be_check = False
+                return should_be_check
+
+            wrapper = functools.partial(
+                checkpoint_wrapper,
+                checkpoint_impl=CheckpointImpl.REENTRANT,
+            )
+            apply_activation_checkpointing(model, checkpoint_wrapper_fn=wrapper, check_fn=check_fn)
 
         return model, optimizer

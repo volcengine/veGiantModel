@@ -1,11 +1,11 @@
 
+
 tokenizer:
-  pretrained_model_name_or_path: ./huggingface/llama-7b-hf
+  pretrained_model_name_or_path: ./huggingface/gpt-66b-hf
   use_slow_tokenizer: True
 
 model:
-  pretrained_model_name_or_path: ./huggingface/llama-7b-hf
-  distributed_mode: fsdp
+  pretrained_model_name_or_path: ./huggingface/gpt-66b-hf
   trust_remote_code: False
   pretrained: False
   init_device: cpu
@@ -16,6 +16,8 @@ distributed:
   strategy: fsdp
   tensor_model_parallel_size: 1
   pipeline_model_parallel_size: 1
+  fsdp_strategy_config:
+    activation_checkpointing: True
 
 dataset:
   dataset_name: ./huggingface/wikitext
@@ -34,9 +36,9 @@ learning_rate:
   lr_warmup_samples: 0
 
 training:
-  micro_batch_size: 12
+  micro_batch_size: 16
   global_batch_size: null
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps:  2
   rampup_batch_size: null
   train_iters: 10000
   train_epochs: null

@@ -4,7 +4,8 @@
 import torch
 from torch.nn import init
 
-from veturbo.fused_ops import dropout_layer_norm
+# from veturbo.fused_ops import dropout_layer_norm
+from veturbo.ops import dropout_layer_norm
 
 
 def _dropout_add_layer_norm_forward(
@@ -649,14 +650,13 @@ def dropout_add_layer_norm_parallel_residual(
 
 class DropoutAddLayerNorm(torch.nn.Module):
     def __init__(self, hidden_size, prenorm=False, p=0.0, eps=1e-5, residual_in_fp32=False, device=None, dtype=None):
-        factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.prenorm = prenorm
         self.p = p
         self.eps = eps
         self.residual_in_fp32 = residual_in_fp32
-        self.weight = torch.nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
-        self.bias = torch.nn.Parameter(torch.empty(hidden_size, **factory_kwargs))
+        self.weight = torch.nn.Parameter(torch.empty(hidden_size, device=device, dtype=dtype))
+        self.bias = torch.nn.Parameter(torch.empty(hidden_size, device=device, dtype=dtype))
         self.reset_parameters()
 
     def reset_parameters(self):

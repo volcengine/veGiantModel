@@ -2,6 +2,7 @@ import torch
 
 from veturbollm.global_vars import get_args
 from veturbollm.optim.base import get_optimizer_with_scheduler
+from veturbollm.utils.dtype import get_torch_dtype
 from veturbollm.utils.operations import convert_outputs_to_fp32
 
 from .ddp import DDPStrategy
@@ -15,18 +16,25 @@ def prepare_distributed_strategy(model):
         strategy = DDPStrategy()
         model.model, _ = strategy.setup_model_and_optimizer(model.model, None)
     elif args.distributed.strategy == "fsdp":
-        strategy = FSDPStrategy()
+        strategy = FSDPStrategy(
+            precision=args.model.precision,
+            forward_prefetch=args.distributed.fsdp_strategy_config.forward_prefetch,
+            limit_all_gathers=args.distributed.fsdp_strategy_config.limit_all_gathers,
+            sync_module_states=args.distributed.fsdp_strategy_config.sync_module_states,
+            activation_checkpointing=args.distributed.fsdp_strategy_config.activation_checkpointing,
+        )
         model.model, _ = strategy.setup_model_and_optimizer(model.model, None)
     else:
         raise NotImplementedError(f"strategy {args.distributed.strategy} is not implemented")
 
     optimizer, lr_scheduler = get_optimizer_with_scheduler(model)
 
+    dtype = get_torch_dtype(args.model.precision)
     if args.model.enable_native_amp:
         model._original_forward = model.forward
-        if args.model.mixed_precision == "fp16":
+        if dtype == torch.float16:
             model.forward = torch.cuda.amp.autocast(dtype=torch.float16)(model.forward)
-        elif args.model.mixed_precision == "bf16":
+        elif dtype == torch.bfloat16:
             model.forward = torch.autocast(device_type="cuda", dtype=torch.bfloat16)(model.forward)
         else:
             model.forward = torch.cuda.amp.autocast()(model.forward)

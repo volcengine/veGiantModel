@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Union
 
 from pydantic import BaseModel
 
@@ -6,6 +6,12 @@ from pydantic import BaseModel
 class TokenizerConfig(BaseModel):
     pretrained_model_name_or_path: str = "gpt2"
     use_slow_tokenizer: bool = False
+
+
+class ArchitectureConfig(BaseModel):
+    num_layers: int = 12
+    hidden_size: int = 768
+    num_attention_heads: int = 12
 
 
 class ModelConfig(BaseModel):
@@ -18,13 +24,19 @@ class ModelConfig(BaseModel):
     enable_dynamo: bool = True
     enable_flash_attn: bool = False
     precision: str = "amp_bf16"
-    mixed_precision: str = "bf16"
     fp8_recipe_handler: Dict[str, Any] = {}
     config_overrides: Dict[str, Any] = {}
 
 
+class FSDPStragegyConfig(BaseModel):
+    forward_prefetch: bool = True
+    limit_all_gathers: bool = True
+    sync_module_states: bool = True
+    activation_checkpointing: bool = False
+
 class DistributedConfig(BaseModel):
     strategy: str = "ddp"  # ddp, fsdp
+    fsdp_strategy_config: FSDPStragegyConfig = FSDPStragegyConfig()
     data_parallel_size: int = 1
     tensor_model_parallel_size: int = 1
     pipeline_model_parallel_size: int = 1

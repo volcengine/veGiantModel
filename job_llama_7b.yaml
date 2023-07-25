@@ -1,0 +1,39 @@
+
+TaskName: "veturbo-llama-7b"
+Description: ""
+
+Tags: []
+UserCodePath: ./
+RemoteMountCodePath: "/root/code/"
+ImageUrl: "vemlp-cn-beijing.cr.volces.com/preset-images/pytorch:2.0.0"
+
+ResourceQueueID: "替换为您自己的队列ID"
+
+# DL framework, support: TensorFlow PS,PyTorch DDP,Horovod,BytePS
+Framework: "PyTorchDDP"
+# Flavor代表机型，去 https://www.volcengine.com/docs/6459/72363 查询
+TaskRoleSpecs:
+    - RoleName: "worker"
+      RoleReplicas: 16
+      Flavor: "ml.hpcpni2.28xlarge"
+
+
+Envs:
+  - Name: "MLP_TRACKING_ENABLE"
+    Value: "false"
+
+AccessType: "Queue"
+
+Entrypoint: |
+  set -x
+  pip install -r requirements.txt
+
+  export PYTHONPATH=./:$PYTHONPATH
+  export GLOO_SOCKET_IFNAME=eth0
+
+  torchrun --nproc_per_node $MLP_WORKER_GPU \
+           --nnodes $MLP_WORKER_NUM \
+           --node_rank $MLP_ROLE_INDEX \
+           --master_addr $MLP_WORKER_0_HOST \
+           --master_port $MLP_WORKER_0_PORT \
+           scripts/pretrain/train.py --config_file configs/llama7b.yaml

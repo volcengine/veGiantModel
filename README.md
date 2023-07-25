@@ -14,7 +14,7 @@
 - PyTorch >= 2.0
 - transformers >= 4.0.0
 
-请使用火山引擎机器学习平台预置的镜像进行训练，目前支持的镜像为：
+请使用火山引擎机器学习平台预置的镜像进行训练：
 
 - vemlp-cn-beijing.cr.volces.com/preset-images/pytorch:2.0.0
 
@@ -26,37 +26,22 @@ pip install -r requirements.txt
 
 
 ## 快速开始
-我们将在此提供一个快速开始的例子，以便您快速上手。
-
-在开始之前，建议检查一下 `run_pretrain.sh` 中配置的模型配置，该配置通常存放在 `configs` 路径下：
-
-- 模型建议提前下载到共享存储中，虽然代码中支持从 Huggingface 直接下载模型，但是受限于网络等多种因素，很容易超时、链接失败等，请参考：https://huggingface.co/docs/hub/models-downloading 中的教程提前进行下载。完成下载后，修改 configs 文件夹中 `pretrained_model_name_or_path` 字段对应的值为模型的本地路径；
-
-接着请修改 [config.yaml](config.yaml) 中的队列、机器数量的配置，然后运行以下命令提交任务：
-
-```bash
-volc ml_task submit --conf config.yaml
-```
+我们将在此提供了快速开始的例子，以便您快速上手。
 
 ### 预训练
 
-我们提供了很多的预置脚本，支持以下不同规模的模型训练，请参考 [scripts/pretrain](scripts/pretrain) 目录下的脚本。
+我们提供了训练代码以支持不同规模的模型训练，如需要查看代码请参考 [scripts/pretrain](scripts/pretrain) 目录下的训练代码。
 
+为了简化快速上手的过程，我们提供了基于火山引擎机器学习平台命令行工具的配置文件，您只需要修改配置文件中的资源组即可启动训练任务。
+
+我们提供了以下配置文件，阅读配置文件可以帮助您快速上手：
+- job_llama_7b.yaml
+- job_llama_65b.yaml
 
 以下是一个启动预训练任务的例子：
 ```bash
-python scripts/pretrain/train.py --config_file configs/llama7b.yaml
+volc ml_task submit --conf job_llama_7b.yaml
 ```
-
-### SFT
-将代码进行简单的调整可以用于支持 SFT 训练任务，我们也同样提供了一个示例：
-```bash
-python scripts/sft_train/train.py --config_file configs/llama7b_sft.yaml
-```
-
-## 配置文件
-完整的配置可以参考 [veturbollm/config.py](veturbollm/config.py) 文件。
-
 
 ## 训练性能
 
@@ -66,9 +51,14 @@ python scripts/sft_train/train.py --config_file configs/llama7b_sft.yaml
 | Model      | GPU Type  | Card Nums | miniBS | GA | TFLOPs | Throughput(tokens/gpu/s)    |
 | ---------- | --------- | --------- | ------ | -- | ------ | --------------------------- |
 | llama-7b   | A100-80G  | 32        | 4      | 4  | 193.9  | 4609                        |
+| llama-7b   | A100-80G  | 512       | 16     | 1  | 205.5  | 4888                        |
 | llama-13b  | A100-80G  | 32        | 4      | 4  | 200.5  | 2486                        |
 | llama-13b  | A100-80G  | 64        | 4      | 4  | 201.6  | 2501                        |
-
+| llama-65b  | A800-80G  | 64        | 12     | 1  | 176.0  | 440                         |
+| llama-65b  | A800-80G  | 128       | 12     | 1  | 177.4  | 443                         |
+| llama-65b  | A800-80G  | 256       | 12     | 1  | 173.7  | 434                         |
+| llama-65b  | A800-80G  | 512       | 12     | 1  | 171.9  | 430                         |
+| llama-65b  | A800-80G  | 512       | 16     | 1  | 181.4  | 454                         |
 
 ## 特性
 ### 火山引擎机器学习功能集成
