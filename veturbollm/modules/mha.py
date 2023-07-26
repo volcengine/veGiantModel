@@ -502,7 +502,7 @@ class MHA(nn.Module):
             if not self.checkpointing:
                 context = self.inner_attn(qkv, **kwargs)
             else:
-                context = torch.utils.checkpoint.checkpoint(self.inner_attn, qkv, **kwargs)
+                context = torch.utils.checkpoint.checkpoint(self.inner_attn, qkv, use_reentrant=False, **kwargs)
         else:
             if not self.return_residual:
                 q = self.Wq(x if mixer_subset is None else x[:, mixer_subset])

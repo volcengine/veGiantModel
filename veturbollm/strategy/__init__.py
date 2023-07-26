@@ -22,6 +22,7 @@ def prepare_distributed_strategy(model):
             limit_all_gathers=args.distributed.fsdp_strategy_config.limit_all_gathers,
             sync_module_states=args.distributed.fsdp_strategy_config.sync_module_states,
             activation_checkpointing=args.distributed.fsdp_strategy_config.activation_checkpointing,
+            use_orig_params=args.distributed.fsdp_strategy_config.use_orig_params,
         )
         model.model, _ = strategy.setup_model_and_optimizer(model.model, None)
     else:

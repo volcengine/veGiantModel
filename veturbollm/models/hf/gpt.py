@@ -380,6 +380,8 @@ class GPTLMHeadModel(GPTPreTrainedModel, GenerationMixin):
         # )
         self.tie_weights()
 
+        self.decoder_cls = Block
+
     def tie_weights(self):
         if self.tie_word_embeddings:
             self.lm_head.weight = self.transformer.embeddings.word_embeddings.weight

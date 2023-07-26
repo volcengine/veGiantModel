@@ -33,6 +33,7 @@ class FSDPStragegyConfig(BaseModel):
     limit_all_gathers: bool = True
     sync_module_states: bool = True
     activation_checkpointing: bool = False
+    use_orig_params: bool = False
 
 
 class DistributedConfig(BaseModel):

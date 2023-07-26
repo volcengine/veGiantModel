@@ -57,12 +57,14 @@ class FSDPStrategy(Strategy):
         limit_all_gathers=True,
         sync_module_states=True,
         activation_checkpointing=False,
+        use_orig_params=False,
     ) -> None:
         self.precision = precision
         self.forward_prefetch = forward_prefetch
         self.limit_all_gathers = limit_all_gathers
         self.sync_module_states = sync_module_states
         self.activation_checkpointing = activation_checkpointing
+        self.use_orig_params = use_orig_params
 
     def setup_model_and_optimizer(self, model, optimizer=None):
         def __auto_wrap_policy(module: torch.nn.Module, recurse: bool, nonwrapped_numel: int) -> bool:
@@ -75,15 +77,23 @@ class FSDPStrategy(Strategy):
                 should_be_wrapped = False
             return should_be_wrapped
 
+        from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+        auto_wrap_policy = functools.partial(
+            transformer_auto_wrap_policy,
+            transformer_layer_cls=[model.decoder_cls],
+        )
+
         mixed_precision = get_mixed_precision(self.precision)[0]
         model = FullyShardedDataParallel(
             model,
-            auto_wrap_policy=__auto_wrap_policy,
+            auto_wrap_policy=auto_wrap_policy,
+            # auto_wrap_policy=auto_wrap_policy,
             device_id=torch.cuda.current_device(),
             forward_prefetch=self.forward_prefetch,
             limit_all_gathers=self.limit_all_gathers,
             mixed_precision=mixed_precision,
             sync_module_states=self.sync_module_states,
+            use_orig_params=self.use_orig_params
         )
 
         if self.activation_checkpointing:
@@ -100,6 +110,9 @@ class FSDPStrategy(Strategy):
                 else:
                     should_be_check = False
                 return should_be_check
+
+            def check_fn(module: torch.nn.Module) -> bool:
+                return isinstance(module, model.decoder_cls)
 
             wrapper = functools.partial(
                 checkpoint_wrapper,
