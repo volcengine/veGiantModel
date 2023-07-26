@@ -330,13 +330,8 @@ class LLaMAForCausalLM(LLaMAPreTrainedModel, GenerationMixin):
         # )
         self.tie_weights()
 
-        # set fsdp wrapper flag
-        for child in self.transformer.layers.children():
-            if isinstance(child, torch.nn.ModuleList):
-                continue
-            if isinstance(child, torch.nn.Module):
-                child._fsdp_wrap = True
-                child._activation_checkpoint_wrap = True
+        # set decoder cls
+        self.decoder_cls = Block
 
     def tie_weights(self):
         if self.tie_word_embeddings:
