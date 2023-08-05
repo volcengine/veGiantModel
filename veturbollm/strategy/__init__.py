@@ -4,6 +4,7 @@ from veturbollm.global_vars import get_args
 from veturbollm.optim.base import get_optimizer_with_scheduler
 from veturbollm.utils.dtype import get_torch_dtype
 from veturbollm.utils.operations import convert_outputs_to_fp32
+from veturbollm.utils.tools import print_rank_0
 
 from .ddp import DDPStrategy
 from .fsdp import FSDPStrategy
@@ -58,7 +59,7 @@ def prepare_distributed_strategy(model):
         fp8_recipe = te_recipe.DelayedScaling(**kwargs)
         fp8_enabled = torch.cuda.get_device_capability()[0] >= 9
         if not fp8_enabled:
-            print(
+            print_rank_0(
                 f"The current device has compute capability of {torch.cuda.get_device_capability()} which is "
                 "insufficient for FP8 mixed precision training (requires a GPU Hopper or higher, compute "
                 "capability of 9 or higher). Will use FP16 instead."
@@ -72,4 +73,6 @@ def prepare_distributed_strategy(model):
         model = torch.compile(model)
     model.model.device = torch.device("cuda")
     model.device = torch.device("cuda")
+
+    print_rank_0(model)
     return model, optimizer, lr_scheduler

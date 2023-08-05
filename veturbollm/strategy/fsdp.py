@@ -1,7 +1,7 @@
 import functools
 
 import torch
-from torch.distributed.fsdp import FullyShardedDataParallel, MixedPrecision
+from torch.distributed.fsdp import FullyShardedDataParallel, MixedPrecision, BackwardPrefetch
 
 from veturbollm.utils.dtype import get_torch_dtype
 
@@ -78,6 +78,7 @@ class FSDPStrategy(Strategy):
             return should_be_wrapped
 
         from torch.distributed.fsdp.wrap import transformer_auto_wrap_policy
+
         auto_wrap_policy = functools.partial(
             transformer_auto_wrap_policy,
             transformer_layer_cls=[model.decoder_cls],
@@ -93,7 +94,8 @@ class FSDPStrategy(Strategy):
             limit_all_gathers=self.limit_all_gathers,
             mixed_precision=mixed_precision,
             sync_module_states=self.sync_module_states,
-            use_orig_params=self.use_orig_params
+            use_orig_params=self.use_orig_params,
+            backward_prefetch=BackwardPrefetch.BACKWARD_PRE,
         )
 
         if self.activation_checkpointing:

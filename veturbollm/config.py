@@ -68,9 +68,9 @@ class RegularizationConfig(BaseModel):
 
 
 class CheckpointingConfig(BaseModel):
-    save: bool = False
+    save: Optional[str] = None
     save_interval: Optional[int] = None
-    load: bool = False
+    load: Optional[str] = None
 
 
 class LoggingConfig(BaseModel):
@@ -109,6 +109,7 @@ class TaskConfig(BaseModel):
     rank: int = 0
     local_rank: int = 0
     world_size: int = 1
+    completed_steps: int = 0
     consumed_train_samples: int = 0
 
     tokenizer: TokenizerConfig = TokenizerConfig()

@@ -8,7 +8,7 @@ import torch.distributed as dist
 import transformers
 from torch.utils.data import DataLoader
 from transformers import default_data_collator
-
+from torch.distributed.fsdp import FullyShardedDataParallel as FSDP
 from veturbollm import initialize_veturbollm
 from veturbollm.data.datasets import get_train_eval_dataset
 from veturbollm.data.sampler import PretrainingRandomSampler, PretrainingSampler, RandomSeedDataset
@@ -18,7 +18,8 @@ from veturbollm.strategy import prepare_distributed_strategy
 from veturbollm.tokenizer import build_tokenizer
 from veturbollm.utils import distribution as dist_utils
 from veturbollm.utils.log import training_log
-from veturbollm.utils.tools import set_seed
+from veturbollm.utils.tools import set_seed, print_rank_0
+from veturbollm.checkpoint import resume_status, resume_optimizer, save_checkpoint
 
 # The flag below controls whether to allow TF32 on matmul. This flag defaults to False
 # in PyTorch 1.12 and later.
@@ -51,6 +52,10 @@ def main():
     args = get_args()
     timers = get_timers()
 
+    # Resume status from checkpoint
+    if args.checkpointing.load:
+        resume_status(args)
+
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -74,10 +79,10 @@ def main():
     train_sampler = PretrainingRandomSampler(
         RandomSeedDataset(train_dataset),
         len(train_dataset),
-        0,
+        args.consumed_train_samples,
         args.training.micro_batch_size,
-        0,
-        1,
+        dist.get_rank(),
+        dist.get_world_size(),
         data_sharding=True,
     )
     eval_sampler = PretrainingSampler(
@@ -107,37 +112,32 @@ def main():
     # Strategy
     model, optimizer, lr_scheduler = prepare_distributed_strategy(model)
 
-    scaler = torch.cuda.amp.GradScaler(enabled=args.model.enable_native_amp)
+    # Resume optimizer and lr_scheduler from checkpoint
+    if args.checkpointing.load:
+        resume_optimizer(model, optimizer, lr_scheduler, args)
 
-    print(model)
+    scaler = torch.cuda.amp.GradScaler(enabled=args.model.enable_native_amp)
 
     # Afterwards we recalculate our number of training epochs
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.training.gradient_accumulation_steps)
     args.training.train_epochs = math.ceil(args.training.train_iters / num_update_steps_per_epoch)
 
     # Train!
-    logger.info("***** Running training *****")
-    logger.info(f"  Num examples = {len(train_dataset)}")
-    logger.info(f"  Instantaneous batch size per device = {args.training.micro_batch_size}")
-    logger.info(
+    print_rank_0("***** Running training *****")
+    print_rank_0(f"  Num examples = {len(train_dataset)}")
+    print_rank_0(f"  Instantaneous batch size per device = {args.training.micro_batch_size}")
+    print_rank_0(
         f"  Total train batch size (w. parallel, distributed & accumulation) = {args.training.global_batch_size}"
     )
-    logger.info(f"  Gradient Accumulation steps = {args.training.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.training.train_iters}")
-
-    # TODO: resume steps and epochs
-    completed_steps = 0
-    starting_epoch = 0
-
-    completed_steps = starting_epoch * num_update_steps_per_epoch
-    args.consumed_train_samples = completed_steps
+    print_rank_0(f"  Gradient Accumulation steps = {args.training.gradient_accumulation_steps}")
+    print_rank_0(f"  Total optimization steps = {args.training.train_iters}")
 
     total_loss_dict = {}
 
     timers("interval-time", log_level=0).start(barrier=True)
     micro_step = 0
     total_flops = 0
-    # for epoch in range(starting_epoch, args.training.train_epochs):
+    report_memory_flag = True
     while True:
         for _, batch in enumerate(train_dataloader):
             model.train()
@@ -157,20 +157,22 @@ def main():
                 scaler.update()
                 optimizer.zero_grad()
                 timers("optimizer").stop()
-                completed_steps += 1
+                args.completed_steps += 1
                 args.consumed_train_samples += args.training.global_batch_size
 
-                training_log(
+                report_memory_flag = training_log(
                     loss_dict,
                     total_loss_dict,
                     optimizer.param_groups[0]["lr"],
-                    completed_steps,
+                    args.completed_steps,
                     scaler.get_scale(),
-                    True,
+                    report_memory_flag,
                     0,
                 )
                 total_flops = 0
-                if completed_steps >= args.training.train_iters:
+                if args.checkpointing.save and args.completed_steps % args.checkpointing.save_interval == 0:
+                    save_checkpoint(model, optimizer, lr_scheduler, args)
+                if args.completed_steps >= args.training.train_iters:
                     break
 
 

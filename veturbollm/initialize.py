@@ -24,10 +24,10 @@ def initialize_distributed(args):
     args.world_size = int(os.getenv("WORLD_SIZE", "1"))
     args.local_rank = args.rank % torch.cuda.device_count()
 
-    init_method = "tcp://"
-    master_ip = os.getenv("MASTER_ADDR", "localhost")
-    master_port = os.getenv("MASTER_PORT", "6000")
-    init_method += master_ip + ":" + master_port
+    # init_method = "tcp://"
+    # master_ip = os.getenv("MASTER_ADDR", "localhost")
+    # master_port = os.getenv("MASTER_PORT", "6000")
+    # init_method += master_ip + ":" + master_port
 
     device_count = torch.cuda.device_count()
     if torch.distributed.is_initialized():
@@ -52,12 +52,19 @@ def initialize_distributed(args):
             torch.cuda.set_device(device)
 
     # Call the init process
+    try:
+        from veturbo.distributed.redis_store import RedisStore
+
+        store = RedisStore(args.rank)
+    except Exception as e:
+        print(f"Failed to initialize RedisStore: {e}, using default store.")
+        store = None
     torch.distributed.init_process_group(
         backend="nccl",
         world_size=args.world_size,
         rank=args.rank,
-        init_method=init_method,
         timeout=timedelta(minutes=30),
+        store=store,
     )
 
 
