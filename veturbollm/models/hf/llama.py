@@ -339,11 +339,12 @@ class LLaMAForCausalLM(LLaMAPreTrainedModel, GenerationMixin):
 
     def reset_parameters(self):
         # TODO: check if this is necessary
-        self.apply(
-            partial(
-                _init_weights, n_layer=self.config.num_hidden_layers, initializer_range=self.config.initializer_range
-            )
-        )
+        # self.apply(
+        #     partial(
+        #         _init_weights, n_layer=self.config.num_hidden_layers, initializer_range=self.config.initializer_range
+        #     )
+        # )
+        pass
 
     def forward(
         self, input_ids, labels=None, position_ids=None, past_key_values=None, last_token_only=False, **kwargs
