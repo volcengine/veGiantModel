@@ -47,9 +47,9 @@ training:
   tensorboard_queue_size: 10
 
 checkpointing:
-  save: False
+  save: ""
   save_interval: null
-  load: False
+  load: ""
 
 logging:
   timing_log_level: 0
